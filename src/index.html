@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Usage</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <h1 class="header-title">Claude Usage</h1>
+    <div class="header-actions">
+      <button id="btn-widget-mode" class="btn btn-accent">Widget Mode</button>
+      <button id="btn-theme" class="btn-theme" title="Toggle dark mode">&#9790;</button>
+    </div>
+  </header>
+
+  <!-- Tabs -->
+  <nav class="tabs">
+    <button class="tab active" data-tab="local">Local Usage</button>
+    <button class="tab" data-tab="analytics">Analytics</button>
+  </nav>
+
+  <!-- Tab 1: Local Usage -->
+  <div id="tab-local" class="tab-content active">
+    <div class="local-date-filter">
+      <label class="date-label">From
+        <input type="date" id="local-date-from" class="date-input" />
+      </label>
+      <label class="date-label">To
+        <input type="date" id="local-date-to" class="date-input" />
+      </label>
+      <button id="btn-refresh-local" class="btn btn-small">&#8635; Refresh</button>
+      <button id="btn-clear-dates" class="btn btn-small">Clear</button>
+    </div>
+
+    <div class="local-summary" id="local-summary"></div>
+
+    <div class="local-layout">
+      <div class="project-list-panel">
+        <h3>Projects</h3>
+        <div id="project-list" class="project-list"></div>
+      </div>
+      <div class="project-detail-panel" id="project-detail">
+        <div class="empty-state">Select a project to view details</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab 2: Analytics -->
+  <div id="tab-analytics" class="tab-content">
+    <div class="local-date-filter">
+      <label class="date-label">From
+        <input type="date" id="analytics-date-from" class="date-input" />
+      </label>
+      <label class="date-label">To
+        <input type="date" id="analytics-date-to" class="date-input" />
+      </label>
+      <button id="btn-refresh-analytics" class="btn btn-small">&#8635; Refresh</button>
+      <button id="btn-clear-analytics-dates" class="btn btn-small">Clear</button>
+    </div>
+
+    <div class="analytics-summary" id="analytics-summary"></div>
+
+    <div class="analytics-charts-grid">
+      <div class="analytics-chart-card">
+        <div class="analytics-chart-title">Daily Token Usage</div>
+        <div class="analytics-chart-wrap"><canvas id="chart-daily-tokens"></canvas></div>
+      </div>
+      <div class="analytics-chart-card">
+        <div class="analytics-chart-title">Daily Cost</div>
+        <div class="analytics-chart-wrap"><canvas id="chart-daily-cost"></canvas></div>
+      </div>
+      <div class="analytics-chart-card">
+        <div class="analytics-chart-title">Token Type Breakdown</div>
+        <div class="analytics-chart-wrap analytics-chart-wrap--doughnut"><canvas id="chart-token-breakdown"></canvas></div>
+      </div>
+      <div class="analytics-chart-card">
+        <div class="analytics-chart-title">Top Projects by Usage</div>
+        <div class="analytics-chart-wrap"><canvas id="chart-top-projects"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Widget View -->
+  <div id="widget-view" class="widget-view">
+    <div class="widget-view-header">
+      <span class="widget-view-title">Claude Usage</span>
+      <div class="widget-view-actions">
+        <button id="btn-pin-widget" class="btn btn-small" title="Keep window above others">Pin</button>
+        <button id="btn-exit-widget" class="btn btn-small">Exit Widget</button>
+      </div>
+    </div>
+    <div class="widget-section">
+      <h3>Today's Local Usage</h3>
+      <div id="widget-local"></div>
+    </div>
+  </div>
+
+  <!-- Chat Viewer Overlay -->
+  <div id="chat-overlay" class="chat-overlay hidden">
+    <div class="chat-panel">
+      <div class="chat-header">
+        <h2>Session Chat</h2>
+        <div class="chat-search-bar">
+          <input type="text" id="chat-search" class="search-input" placeholder="Search in chat..." />
+          <span id="chat-search-count" class="search-count"></span>
+        </div>
+        <button id="btn-close-chat" class="btn btn-icon">&times;</button>
+      </div>
+      <div class="chat-body" id="chat-body"></div>
+    </div>
+  </div>
+
+  <!-- Image Lightbox -->
+  <div id="image-lightbox" class="image-lightbox hidden">
+    <img id="lightbox-img" src="" alt="Full size" />
+  </div>
+
+  <script src="vendor/chart.umd.min.js"></script>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>
