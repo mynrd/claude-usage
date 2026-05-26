@@ -20,24 +20,27 @@ export async function loadLocalUsage() {
   const projects = await window.api.listProjects(from, to);
   currentProjects = projects;
 
-  const totalTokens      = projects.reduce((s, p) => s + p.totalTokens,      0);
-  const totalInput       = projects.reduce((s, p) => s + p.totalInput,        0);
   const totalOutput      = projects.reduce((s, p) => s + p.totalOutput,       0);
-  const totalCost        = projects.reduce((s, p) => s + (p.totalCost || 0),  0);
+  const totalCacheCreate = projects.reduce((s, p) => s + p.totalCacheCreate,   0);
+  const totalCacheRead   = projects.reduce((s, p) => s + p.totalCacheRead,     0);
+  const totalCost        = projects.reduce((s, p) => s + (p.totalCost || 0),   0);
 
   document.getElementById('local-summary').innerHTML = `
     <div class="summary-stat">
-      <div class="stat-value">${formatNum(totalTokens)}</div>
-      <div class="stat-label">Total Tokens</div>
-      <div class="stat-cost">${formatCost(totalCost)}</div>
-    </div>
-    <div class="summary-stat">
-      <div class="stat-value">${formatNum(totalInput)}</div>
-      <div class="stat-label">Input Tokens</div>
+      <div class="stat-value">${formatCost(totalCost)}</div>
+      <div class="stat-label">Est. Cost</div>
     </div>
     <div class="summary-stat">
       <div class="stat-value">${formatNum(totalOutput)}</div>
-      <div class="stat-label">Output Tokens</div>
+      <div class="stat-label">Output</div>
+    </div>
+    <div class="summary-stat">
+      <div class="stat-value">${formatNum(totalCacheCreate)}</div>
+      <div class="stat-label">Cache Write</div>
+    </div>
+    <div class="summary-stat">
+      <div class="stat-value">${formatNum(totalCacheRead)}</div>
+      <div class="stat-label">Cache Read</div>
     </div>
     <div class="summary-stat">
       <div class="stat-value">${projects.length}</div>
@@ -132,10 +135,9 @@ function renderSessionRows(sessions) {
       <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName}</td>
       <td>${modelHtml}</td>
       <td>${started}</td>
-      <td class="tok-input">${formatNum(s.input)}</td>
       <td class="tok-output">${formatNum(s.output)}</td>
-      <td class="tok-cache">${formatNum(s.cacheCreate + s.cacheRead)}</td>
-      <td class="tok-total">${formatNum(s.total)}</td>
+      <td class="tok-cache">${formatNum(s.cacheCreate)}</td>
+      <td class="tok-cache">${formatNum(s.cacheRead)}</td>
       <td class="cost-badge">${formatCost(cost)}</td>
     </tr>`;
   }).join('');
@@ -162,7 +164,7 @@ function renderSessionsTab(detail, folder) {
     <table class="session-table">
       <thead><tr>
         <th>Session</th><th>Model</th><th>Started</th>
-        <th>Input</th><th>Output</th><th>Cache</th><th>Total</th><th>Est. Cost</th>
+        <th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th>
       </tr></thead>
       <tbody id="session-tbody">${renderSessionRows(detail.sessions)}</tbody>
     </table>
@@ -184,7 +186,7 @@ function renderSessionsTab(detail, folder) {
       const filtered = detail.sessions.filter(s => matchSet.has(s.sessionId));
       document.getElementById('session-tbody').innerHTML = filtered.length
         ? renderSessionRows(filtered)
-        : '<tr><td colspan="7" class="empty-state" style="padding:20px">No matches</td></tr>';
+        : '<tr><td colspan="6" class="empty-state" style="padding:20px">No matches</td></tr>';
       bindSessionClicks(sessEl, folder);
     }, 400);
   });
@@ -199,21 +201,19 @@ function renderDailyTab(detail) {
   }
 
   const dRows = [...detail.dailyTotals].reverse().map(d => {
-    const total = d.input + d.output + d.cacheCreate + d.cacheRead;
     const cost = d.cost != null ? d.cost : estimateCost(d.input, d.output, d.cacheCreate, d.cacheRead, null);
     return `<tr>
       <td>${d.date}</td>
-      <td class="tok-input">${formatNum(d.input)}</td>
       <td class="tok-output">${formatNum(d.output)}</td>
-      <td class="tok-cache">${formatNum(d.cacheCreate + d.cacheRead)}</td>
-      <td class="tok-total">${formatNum(total)}</td>
+      <td class="tok-cache">${formatNum(d.cacheCreate)}</td>
+      <td class="tok-cache">${formatNum(d.cacheRead)}</td>
       <td class="cost-badge">${formatCost(cost)}</td>
     </tr>`;
   }).join('');
 
   dailyEl.innerHTML = `
     <table class="daily-table">
-      <thead><tr><th>Date</th><th>Input</th><th>Output</th><th>Cache</th><th>Total</th><th>Est. Cost</th></tr></thead>
+      <thead><tr><th>Date</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th></tr></thead>
       <tbody>${dRows}</tbody>
     </table>
   `;

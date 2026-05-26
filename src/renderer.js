@@ -26,10 +26,4 @@ initChatViewer();
 initWidget();
 initTheme();
 
-// Default date filters to today
-const _td = new Date();
-const todayStr = `${_td.getFullYear()}-${String(_td.getMonth() + 1).padStart(2, '0')}-${String(_td.getDate()).padStart(2, '0')}`;
-document.getElementById('local-date-from').value = todayStr;
-document.getElementById('local-date-to').value   = todayStr;
-
 loadLocalUsage();
