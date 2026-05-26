@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { calcCost } = require('./pricing');
+const { calcCost, calcCostBreakdown } = require('./pricing');
 
 function getClaudeProjectsDir() {
   return path.join(os.homedir(), '.claude', 'projects');
@@ -153,17 +153,22 @@ function getProjectDetail(folder, startDate, endDate) {
             cacheCreate += u.cache_creation_input_tokens || 0;
             cacheRead   += u.cache_read_input_tokens || 0;
             const day = dt ? dt.toISOString().split('T')[0] : null;
-            const recCost = calcCost(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, recModel, day);
+            const bd  = calcCostBreakdown(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, recModel, day);
+            const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             cost += recCost;
             if (recModel && recModel !== '<synthetic>') {
               models.add(recModel);
-              if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+              if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0 };
               const mu = modelUsage[recModel];
-              mu.input      += u.input_tokens || 0;
-              mu.output     += u.output_tokens || 0;
-              mu.cacheCreate += u.cache_creation_input_tokens || 0;
-              mu.cacheRead  += u.cache_read_input_tokens || 0;
-              mu.cost       += recCost;
+              mu.input           += u.input_tokens || 0;
+              mu.output          += u.output_tokens || 0;
+              mu.cacheCreate     += u.cache_creation_input_tokens || 0;
+              mu.cacheRead       += u.cache_read_input_tokens || 0;
+              mu.inputCost       += bd.input;
+              mu.outputCost      += bd.output;
+              mu.cacheCreateCost += bd.cacheCreate;
+              mu.cacheReadCost   += bd.cacheRead;
+              mu.cost            += recCost;
             }
             if (dt) {
               if (!firstTs || dt < firstTs) firstTs = dt;

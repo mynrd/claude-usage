@@ -50,21 +50,30 @@ function getModelKey(modelName) {
   return match[3] != null ? `${match[1]}-${match[2]}.${match[3]}` : `${match[1]}-${match[2]}`;
 }
 
-function calcCost(input, output, cacheCreate, cacheRead, modelName, date) {
-  const key = getModelKey(modelName);
+// Returns cost split by token type: { input, output, cacheCreate, cacheRead }
+function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date) {
+  const key  = getModelKey(modelName);
   const hist = getPricingForDate(key, date || null);
   if (hist) {
-    return (input / 1e6) * hist.input
-         + (output / 1e6) * hist.output
-         + (cacheCreate / 1e6) * hist.cacheWrite5m
-         + (cacheRead / 1e6) * hist.cacheRead;
+    return {
+      input:       (input / 1e6) * hist.input,
+      output:      (output / 1e6) * hist.output,
+      cacheCreate: (cacheCreate / 1e6) * hist.cacheWrite5m,
+      cacheRead:   (cacheRead / 1e6) * hist.cacheRead,
+    };
   }
-  // Fall back to hardcoded rates
   const p = getModelPricing(modelName);
-  return (input / 1e6) * p.input
-       + (output / 1e6) * p.output
-       + (cacheCreate / 1e6) * p.input * 1.25
-       + (cacheRead / 1e6) * p.input * 0.10;
+  return {
+    input:       (input / 1e6) * p.input,
+    output:      (output / 1e6) * p.output,
+    cacheCreate: (cacheCreate / 1e6) * p.input * 1.25,
+    cacheRead:   (cacheRead / 1e6) * p.input * 0.10,
+  };
 }
 
-module.exports = { MODEL_PRICING, getModelPricing, calcCost };
+function calcCost(input, output, cacheCreate, cacheRead, modelName, date) {
+  const b = calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date);
+  return b.input + b.output + b.cacheCreate + b.cacheRead;
+}
+
+module.exports = { MODEL_PRICING, getModelPricing, calcCost, calcCostBreakdown };

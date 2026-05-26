@@ -856,6 +856,7 @@ body.widget-mode .widget-view {
 .tok-output { color: var(--accent); }
 .tok-cache { color: var(--subtext); }
 .tok-total { font-weight: 700; }
+.tok-cost { font-size: 10px; color: var(--subtext); }
 
 /* ── Model badges ────────────────────────────────────────────────── */
 .model-badge {

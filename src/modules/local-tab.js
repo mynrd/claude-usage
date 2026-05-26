@@ -288,32 +288,36 @@ function showModelDetailModal(session) {
   if (!usage.length) {
     body.innerHTML = '<div class="empty-state">No model breakdown available</div>';
   } else {
+    const tc = (n, c) => `${formatNum(n)} <span class="tok-cost">(${formatCost(c)})</span>`;
     const rows = usage.map(m => `
       <tr>
         <td><span class="model-badge model-${shortModel(m.model).split('-')[0]}">${shortModel(m.model)}</span></td>
-        <td class="tok-output">${formatNum(m.output)}</td>
-        <td class="tok-cache">${formatNum(m.cacheCreate)}</td>
-        <td class="tok-cache">${formatNum(m.cacheRead)}</td>
-        <td class="tok-input">${formatNum(m.input)}</td>
+        <td class="tok-input">${tc(m.input, m.inputCost || 0)}</td>
+        <td class="tok-cache">${tc(m.cacheCreate, m.cacheCreateCost || 0)}</td>
+        <td class="tok-cache">${tc(m.cacheRead, m.cacheReadCost || 0)}</td>
+        <td class="tok-output">${tc(m.output, m.outputCost || 0)}</td>
         <td class="cost-badge">${formatCost(m.cost)}</td>
       </tr>`).join('');
     const tot = usage.reduce((a, m) => {
-      a.output += m.output; a.cacheCreate += m.cacheCreate;
-      a.cacheRead += m.cacheRead; a.input += m.input; a.cost += m.cost;
+      a.output += m.output; a.outputCost += m.outputCost || 0;
+      a.cacheCreate += m.cacheCreate; a.cacheCreateCost += m.cacheCreateCost || 0;
+      a.cacheRead += m.cacheRead; a.cacheReadCost += m.cacheReadCost || 0;
+      a.input += m.input; a.inputCost += m.inputCost || 0;
+      a.cost += m.cost;
       return a;
-    }, { output: 0, cacheCreate: 0, cacheRead: 0, input: 0, cost: 0 });
+    }, { output: 0, outputCost: 0, cacheCreate: 0, cacheCreateCost: 0, cacheRead: 0, cacheReadCost: 0, input: 0, inputCost: 0, cost: 0 });
     body.innerHTML = `
       <table class="model-detail-table">
         <thead><tr>
-          <th>Model</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Input</th><th>Est. Cost</th>
+          <th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Total</th>
         </tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr>
           <td><strong>Total</strong></td>
-          <td>${formatNum(tot.output)}</td>
-          <td>${formatNum(tot.cacheCreate)}</td>
-          <td>${formatNum(tot.cacheRead)}</td>
-          <td>${formatNum(tot.input)}</td>
+          <td>${tc(tot.input, tot.inputCost)}</td>
+          <td>${tc(tot.cacheCreate, tot.cacheCreateCost)}</td>
+          <td>${tc(tot.cacheRead, tot.cacheReadCost)}</td>
+          <td>${tc(tot.output, tot.outputCost)}</td>
           <td class="cost-badge"><strong>${formatCost(tot.cost)}</strong></td>
         </tr></tfoot>
       </table>`;
@@ -325,6 +329,9 @@ function showModelDetailModal(session) {
 
 export function initLocalTab() {
   initModelDetailModal();
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('local-date-from').value = today;
+  document.getElementById('local-date-to').value   = today;
   document.getElementById('local-date-from').addEventListener('change', loadLocalUsage);
   document.getElementById('local-date-to').addEventListener('change', loadLocalUsage);
   document.getElementById('btn-refresh-local').addEventListener('click', loadLocalUsage);
