@@ -959,3 +959,88 @@ body.widget-mode .widget-view {
   justify-content: center;
   max-height: 220px;
 }
+
+/* ── Model Detail Modal ───────────────────────────────────────────── */
+.model-detail-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+}
+.model-detail-overlay.hidden { display: none; }
+.model-detail-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  min-width: 520px;
+  max-width: 720px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+}
+.model-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.model-detail-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.model-detail-title em { font-style: normal; color: var(--subtext); }
+.modal-close-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--subtext);
+  padding: 0 2px;
+}
+.modal-close-btn:hover { color: var(--text); }
+.model-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.model-detail-table th,
+.model-detail-table td {
+  padding: 7px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--card-bd);
+}
+.model-detail-table th:first-child,
+.model-detail-table td:first-child { text-align: left; }
+.model-detail-table thead th {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--subtext);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--table-head);
+}
+.model-detail-table tfoot td {
+  border-top: 2px solid var(--card-bd);
+  border-bottom: none;
+}
+.btn-detail {
+  font-size: 10px;
+  padding: 2px 7px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--subtext);
+  white-space: nowrap;
+}
+.btn-detail:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}

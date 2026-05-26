@@ -5,6 +5,7 @@ import { openSessionChat } from './chat-viewer.js';
 let currentProjects = [];
 let activeProjectFolder = null;
 let detailChart = null;
+let sessionMap = {};
 
 function getDateRange() {
   return {
@@ -121,6 +122,7 @@ function shortModel(m) {
 }
 
 function renderSessionRows(sessions) {
+  sessions.forEach(s => { sessionMap[s.sessionId] = s; });
   return sessions.map(s => {
     const started = s.startedAt
       ? new Date(s.startedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -128,7 +130,7 @@ function renderSessionRows(sessions) {
     const displayName = s.title || s.sessionId.substring(0, 8) + '...';
     const models = s.models || (s.model ? [s.model] : []);
     const costModel = models.length > 0 ? models[0] : null;
-    const cost = estimateCost(s.input, s.output, s.cacheCreate, s.cacheRead, costModel);
+    const cost = s.cost ?? estimateCost(s.input, s.output, s.cacheCreate, s.cacheRead, costModel);
     const modelHtml = models.length === 0 ? 'N/A'
       : models.map(m => `<span class="model-badge model-${shortModel(m).split('-')[0]}">${shortModel(m)}</span>`).join(' ');
     return `<tr class="session-row" data-sid="${s.sessionId}">
@@ -139,6 +141,7 @@ function renderSessionRows(sessions) {
       <td class="tok-cache">${formatNum(s.cacheCreate)}</td>
       <td class="tok-cache">${formatNum(s.cacheRead)}</td>
       <td class="cost-badge">${formatCost(cost)}</td>
+      <td><button class="btn-detail" data-sid="${s.sessionId}">Detail</button></td>
     </tr>`;
   }).join('');
 }
@@ -146,6 +149,13 @@ function renderSessionRows(sessions) {
 function bindSessionClicks(sessEl, folder) {
   sessEl.querySelectorAll('.session-row').forEach(row => {
     row.addEventListener('click', () => openSessionChat(folder, row.dataset.sid));
+  });
+  sessEl.querySelectorAll('.btn-detail').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = sessionMap[btn.dataset.sid];
+      if (s) showModelDetailModal(s);
+    });
   });
 }
 
@@ -164,7 +174,7 @@ function renderSessionsTab(detail, folder) {
     <table class="session-table">
       <thead><tr>
         <th>Session</th><th>Model</th><th>Started</th>
-        <th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th>
+        <th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th><th></th>
       </tr></thead>
       <tbody id="session-tbody">${renderSessionRows(detail.sessions)}</tbody>
     </table>
@@ -248,9 +258,73 @@ function renderDetailChart(dailyTotals) {
   });
 }
 
+// ── Model Detail Modal ────────────────────────────────────────────────────────
+
+function initModelDetailModal() {
+  const overlay = document.createElement('div');
+  overlay.id = 'model-detail-overlay';
+  overlay.className = 'model-detail-overlay hidden';
+  overlay.innerHTML = `
+    <div class="model-detail-card">
+      <div class="model-detail-header">
+        <span class="model-detail-title">Model Usage — <em id="modal-session-title"></em></span>
+        <button id="modal-close" class="modal-close-btn">×</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('modal-close').addEventListener('click', () => overlay.classList.add('hidden'));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.add('hidden'); });
+}
+
+function showModelDetailModal(session) {
+  const overlay = document.getElementById('model-detail-overlay');
+  const body    = document.getElementById('modal-body');
+  document.getElementById('modal-session-title').textContent =
+    session.title || session.sessionId.substring(0, 12) + '…';
+
+  const usage = session.modelUsage || [];
+  if (!usage.length) {
+    body.innerHTML = '<div class="empty-state">No model breakdown available</div>';
+  } else {
+    const rows = usage.map(m => `
+      <tr>
+        <td><span class="model-badge model-${shortModel(m.model).split('-')[0]}">${shortModel(m.model)}</span></td>
+        <td class="tok-output">${formatNum(m.output)}</td>
+        <td class="tok-cache">${formatNum(m.cacheCreate)}</td>
+        <td class="tok-cache">${formatNum(m.cacheRead)}</td>
+        <td class="tok-input">${formatNum(m.input)}</td>
+        <td class="cost-badge">${formatCost(m.cost)}</td>
+      </tr>`).join('');
+    const tot = usage.reduce((a, m) => {
+      a.output += m.output; a.cacheCreate += m.cacheCreate;
+      a.cacheRead += m.cacheRead; a.input += m.input; a.cost += m.cost;
+      return a;
+    }, { output: 0, cacheCreate: 0, cacheRead: 0, input: 0, cost: 0 });
+    body.innerHTML = `
+      <table class="model-detail-table">
+        <thead><tr>
+          <th>Model</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Input</th><th>Est. Cost</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr>
+          <td><strong>Total</strong></td>
+          <td>${formatNum(tot.output)}</td>
+          <td>${formatNum(tot.cacheCreate)}</td>
+          <td>${formatNum(tot.cacheRead)}</td>
+          <td>${formatNum(tot.input)}</td>
+          <td class="cost-badge"><strong>${formatCost(tot.cost)}</strong></td>
+        </tr></tfoot>
+      </table>`;
+  }
+  overlay.classList.remove('hidden');
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 export function initLocalTab() {
+  initModelDetailModal();
   document.getElementById('local-date-from').addEventListener('change', loadLocalUsage);
   document.getElementById('local-date-to').addEventListener('change', loadLocalUsage);
   document.getElementById('btn-refresh-local').addEventListener('click', loadLocalUsage);

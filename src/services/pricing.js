@@ -1,6 +1,7 @@
-// Per-million-token USD list prices.
-// Source: https://platform.claude.com/docs/en/about-claude/pricing (verified 2026-05-20).
-// Cache multipliers: 5m write = 1.25x input, 1h write = 2x input, cache read/refresh = 0.10x input.
+const { getPricingForDate } = require('./price-history');
+
+// Hardcoded fallback prices (per million tokens).
+// Primary source is price-history.json; this is used only when history lookup fails.
 const MODEL_PRICING = {
   'opus-4.7':    { input: 5,    output: 25 },
   'opus-4.6':    { input: 5,    output: 25 },
@@ -41,7 +42,24 @@ function getModelPricing(modelName) {
   return FAMILY_DEFAULT.sonnet;
 }
 
-function calcCost(input, output, cacheCreate, cacheRead, modelName) {
+function getModelKey(modelName) {
+  if (!modelName) return null;
+  const m = modelName.toLowerCase();
+  const match = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
+  if (!match) return null;
+  return match[3] != null ? `${match[1]}-${match[2]}.${match[3]}` : `${match[1]}-${match[2]}`;
+}
+
+function calcCost(input, output, cacheCreate, cacheRead, modelName, date) {
+  const key = getModelKey(modelName);
+  const hist = getPricingForDate(key, date || null);
+  if (hist) {
+    return (input / 1e6) * hist.input
+         + (output / 1e6) * hist.output
+         + (cacheCreate / 1e6) * hist.cacheWrite5m
+         + (cacheRead / 1e6) * hist.cacheRead;
+  }
+  // Fall back to hardcoded rates
   const p = getModelPricing(modelName);
   return (input / 1e6) * p.input
        + (output / 1e6) * p.output

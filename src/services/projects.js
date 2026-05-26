@@ -63,7 +63,7 @@ function listLocalProjects(startDate, endDate) {
 
     for (const jf of jsonlFiles) {
       let sessionHasMatch = false;
-      let sInput = 0, sOutput = 0, sCacheCreate = 0, sCacheRead = 0;
+      let sInput = 0, sOutput = 0, sCacheCreate = 0, sCacheRead = 0, sCost = 0;
       const sModels = new Set();
       try {
         for (const line of fs.readFileSync(path.join(fullPath, jf), 'utf8').trim().split('\n')) {
@@ -82,6 +82,8 @@ function listLocalProjects(startDate, endDate) {
               sCacheCreate += u.cache_creation_input_tokens || 0;
               sCacheRead += u.cache_read_input_tokens || 0;
               if (model && model !== '<synthetic>') sModels.add(model);
+              const day = dt ? dt.toISOString().split('T')[0] : null;
+              sCost += calcCost(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, model, day);
               sessionHasMatch = true;
               hasMatchingRecords = true;
               if (dt && (!lastActive || dt > lastActive)) lastActive = dt;
@@ -95,8 +97,7 @@ function listLocalProjects(startDate, endDate) {
         totalOutput += sOutput;
         totalCacheCreate += sCacheCreate;
         totalCacheRead += sCacheRead;
-        const costModel = sModels.size > 0 ? [...sModels][0] : null;
-        totalCost += calcCost(sInput, sOutput, sCacheCreate, sCacheRead, costModel);
+        totalCost += sCost;
       }
     }
 
@@ -129,9 +130,10 @@ function getProjectDetail(folder, startDate, endDate) {
 
   for (const jf of fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'))) {
     const sessionId = jf.replace('.jsonl', '');
-    let input = 0, output = 0, cacheCreate = 0, cacheRead = 0;
+    let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
     let firstTs = null, lastTs = null, title = null;
     const models = new Set();
+    const modelUsage = {};
 
     try {
       for (const line of fs.readFileSync(path.join(dir, jf), 'utf8').trim().split('\n')) {
@@ -150,17 +152,28 @@ function getProjectDetail(folder, startDate, endDate) {
             output      += u.output_tokens || 0;
             cacheCreate += u.cache_creation_input_tokens || 0;
             cacheRead   += u.cache_read_input_tokens || 0;
-            if (recModel && recModel !== '<synthetic>') models.add(recModel);
+            const day = dt ? dt.toISOString().split('T')[0] : null;
+            const recCost = calcCost(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, recModel, day);
+            cost += recCost;
+            if (recModel && recModel !== '<synthetic>') {
+              models.add(recModel);
+              if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+              const mu = modelUsage[recModel];
+              mu.input      += u.input_tokens || 0;
+              mu.output     += u.output_tokens || 0;
+              mu.cacheCreate += u.cache_creation_input_tokens || 0;
+              mu.cacheRead  += u.cache_read_input_tokens || 0;
+              mu.cost       += recCost;
+            }
             if (dt) {
               if (!firstTs || dt < firstTs) firstTs = dt;
               if (!lastTs  || dt > lastTs)  lastTs  = dt;
-              const day = dt.toISOString().split('T')[0];
               if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
               dailyMap[day].input       += u.input_tokens || 0;
               dailyMap[day].output      += u.output_tokens || 0;
               dailyMap[day].cacheCreate += u.cache_creation_input_tokens || 0;
               dailyMap[day].cacheRead   += u.cache_read_input_tokens || 0;
-              dailyMap[day].cost        += calcCost(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, recModel);
+              dailyMap[day].cost        += recCost;
             }
           }
         } catch {}
@@ -171,7 +184,8 @@ function getProjectDetail(folder, startDate, endDate) {
     if (total > 0) {
       sessions.push({
         sessionId, title, models: [...models],
-        input, output, cacheCreate, cacheRead, total,
+        input, output, cacheCreate, cacheRead, total, cost,
+        modelUsage: Object.entries(modelUsage).map(([model, u]) => ({ model, ...u })),
         startedAt: firstTs ? firstTs.toISOString() : null,
         lastAt:    lastTs  ? lastTs.toISOString()  : null,
       });
@@ -211,7 +225,7 @@ function getTodayLocalSummary() {
                 const iT = u.input_tokens || 0, oT = u.output_tokens || 0;
                 const ccT = u.cache_creation_input_tokens || 0, crT = u.cache_read_input_tokens || 0;
                 input += iT; output += oT; cacheCreate += ccT; cacheRead += crT;
-                cost += calcCost(iT, oT, ccT, crT, rec.message.model || sessionModel);
+                cost += calcCost(iT, oT, ccT, crT, rec.message.model || sessionModel, today);
               }
             }
           } catch {}
@@ -372,7 +386,7 @@ function getAggregatedDailyTotals(startDate, endDate) {
               const oT = u.output_tokens || 0;
               const ccT = u.cache_creation_input_tokens || 0;
               const crT = u.cache_read_input_tokens || 0;
-              const cost = calcCost(iT, oT, ccT, crT, model);
+              const cost = calcCost(iT, oT, ccT, crT, model, day);
 
               pInput += iT; pOutput += oT; pCacheCreate += ccT; pCacheRead += crT; pCost += cost;
 
