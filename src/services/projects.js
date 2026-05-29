@@ -469,12 +469,12 @@ function getAggregatedDailyTotals(startDate, endDate) {
               const oT = u.output_tokens || 0;
               const ccT = u.cache_creation_input_tokens || 0;
               const crT = u.cache_read_input_tokens || 0;
+              const day = dt ? dt.toISOString().split('T')[0] : null;
               const cost = calcCost(iT, oT, ccT, crT, model, day);
 
               pInput += iT; pOutput += oT; pCacheCreate += ccT; pCacheRead += crT; pCost += cost;
 
               if (dt) {
-                const day = dt.toISOString().split('T')[0];
                 if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
                 dailyMap[day].input       += iT;
                 dailyMap[day].output      += oT;
