@@ -2,57 +2,6 @@ import { escapeHtml, highlightText, formatNum } from './utils.js';
 
 let chatMessages = [];
 
-// Find the index of the bracket that closes the JSON value opened at `start`,
-// respecting string literals and escapes. Returns -1 if unbalanced.
-function findJsonEnd(text, start) {
-  let depth = 0;
-  let inString = false;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (inString) {
-      if (c === '\\') { i++; continue; }
-      if (c === '"') inString = false;
-      continue;
-    }
-    if (c === '"') { inString = true; continue; }
-    if (c === '{' || c === '[') depth++;
-    else if (c === '}' || c === ']') {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
-// Split `text` into alternating plain-text and valid-JSON segments.
-function extractJsonSegments(text) {
-  const segments = [];
-  let i = 0;
-  let textStart = 0;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '{' || ch === '[') {
-      const end = findJsonEnd(text, i);
-      if (end !== -1) {
-        const candidate = text.slice(i, end + 1);
-        try {
-          const parsed = JSON.parse(candidate);
-          if (parsed !== null && typeof parsed === 'object') {
-            if (i > textStart) segments.push({ type: 'text', value: text.slice(textStart, i) });
-            segments.push({ type: 'json', value: JSON.stringify(parsed, null, 2) });
-            i = end + 1;
-            textStart = i;
-            continue;
-          }
-        } catch { /* not valid JSON, treat as text */ }
-      }
-    }
-    i++;
-  }
-  if (textStart < text.length) segments.push({ type: 'text', value: text.slice(textStart) });
-  return segments;
-}
-
 // Pretty-print a string that is entirely a JSON object/array; else return it unchanged.
 function prettyJson(str) {
   const trimmed = str.trim();
@@ -64,18 +13,20 @@ function prettyJson(str) {
   return str;
 }
 
-// Render text, pretty-printing any embedded valid JSON as a code block.
+// Render text. Only pretty-print as a JSON code block when the ENTIRE content
+// is a JSON object/array; otherwise render the original text unchanged.
 function renderJsonAware(text, highlight) {
-  const segments = extractJsonSegments(text);
-  if (!segments.some(s => s.type === 'json')) {
-    return highlightText(escapeHtml(text), highlight);
+  const trimmed = text.trim();
+  if (/^[{[]/.test(trimmed)) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === 'object') {
+        const pretty = JSON.stringify(parsed, null, 2);
+        return `<pre class="chat-json"><code>${highlightText(escapeHtml(pretty), highlight)}</code></pre>`;
+      }
+    } catch { /* not whole-content JSON — render as plain text */ }
   }
-  return segments.map(s => {
-    if (s.type === 'json') {
-      return `<pre class="chat-json"><code>${highlightText(escapeHtml(s.value), highlight)}</code></pre>`;
-    }
-    return highlightText(escapeHtml(s.value), highlight);
-  }).join('');
+  return highlightText(escapeHtml(text), highlight);
 }
 
 function renderIdeContext(text) {

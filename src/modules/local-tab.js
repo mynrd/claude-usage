@@ -21,15 +21,16 @@ export async function loadLocalUsage() {
   const projects = await window.api.listProjects(from, to);
   currentProjects = projects;
 
+  const totalInput       = projects.reduce((s, p) => s + p.totalInput,        0);
   const totalOutput      = projects.reduce((s, p) => s + p.totalOutput,       0);
   const totalCacheCreate = projects.reduce((s, p) => s + p.totalCacheCreate,   0);
   const totalCacheRead   = projects.reduce((s, p) => s + p.totalCacheRead,     0);
-  const totalCost        = projects.reduce((s, p) => s + (p.totalCost || 0),   0);
+  const totalTokens      = totalInput + totalOutput + totalCacheCreate + totalCacheRead;
 
   document.getElementById('local-summary').innerHTML = `
     <div class="summary-stat">
-      <div class="stat-value">${formatCost(totalCost)}</div>
-      <div class="stat-label">Est. Cost</div>
+      <div class="stat-value">${formatNum(totalInput)}</div>
+      <div class="stat-label">Input</div>
     </div>
     <div class="summary-stat">
       <div class="stat-value">${formatNum(totalOutput)}</div>
@@ -43,9 +44,9 @@ export async function loadLocalUsage() {
       <div class="stat-value">${formatNum(totalCacheRead)}</div>
       <div class="stat-label">Cache Read</div>
     </div>
-    <div class="summary-stat">
-      <div class="stat-value">${projects.length}</div>
-      <div class="stat-label">Projects</div>
+    <div class="summary-stat summary-stat-full">
+      <div class="stat-value">${formatNum(totalTokens)}</div>
+      <div class="stat-label">Total Tokens</div>
     </div>
   `;
 
@@ -129,18 +130,18 @@ function renderSessionRows(sessions) {
       : 'N/A';
     const displayName = s.title || s.sessionId.substring(0, 8) + '...';
     const models = s.models || (s.model ? [s.model] : []);
-    const costModel = models.length > 0 ? models[0] : null;
-    const cost = s.cost ?? estimateCost(s.input, s.output, s.cacheCreate, s.cacheRead, costModel);
+    const total = s.total ?? (s.input + s.output + s.cacheCreate + s.cacheRead);
     const modelHtml = models.length === 0 ? 'N/A'
       : models.map(m => `<span class="model-badge model-${shortModel(m).split('-')[0]}">${shortModel(m)}</span>`).join(' ');
     return `<tr class="session-row" data-sid="${s.sessionId}">
       <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName}</td>
       <td>${modelHtml}</td>
       <td>${started}</td>
+      <td class="tok-input">${formatNum(s.input)}</td>
       <td class="tok-output">${formatNum(s.output)}</td>
       <td class="tok-cache">${formatNum(s.cacheCreate)}</td>
       <td class="tok-cache">${formatNum(s.cacheRead)}</td>
-      <td class="cost-badge">${formatCost(cost)}</td>
+      <td class="tok-total">${formatNum(total)}</td>
       <td><button class="btn-detail" data-sid="${s.sessionId}">Detail</button></td>
     </tr>`;
   }).join('');
@@ -174,7 +175,7 @@ function renderSessionsTab(detail, folder) {
     <table class="session-table">
       <thead><tr>
         <th>Session</th><th>Model</th><th>Started</th>
-        <th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th><th></th>
+        <th>Input</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Total Tokens</th><th></th>
       </tr></thead>
       <tbody id="session-tbody">${renderSessionRows(detail.sessions)}</tbody>
     </table>
@@ -196,7 +197,7 @@ function renderSessionsTab(detail, folder) {
       const filtered = detail.sessions.filter(s => matchSet.has(s.sessionId));
       document.getElementById('session-tbody').innerHTML = filtered.length
         ? renderSessionRows(filtered)
-        : '<tr><td colspan="6" class="empty-state" style="padding:20px">No matches</td></tr>';
+        : '<tr><td colspan="9" class="empty-state" style="padding:20px">No matches</td></tr>';
       bindSessionClicks(sessEl, folder);
     }, 400);
   });
