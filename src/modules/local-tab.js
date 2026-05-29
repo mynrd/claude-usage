@@ -129,12 +129,17 @@ function renderSessionRows(sessions) {
       ? new Date(s.startedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       : 'N/A';
     const displayName = s.title || s.sessionId.substring(0, 8) + '...';
+    // Auto-titles repeat across sessions, so always show a short id to disambiguate.
+    const idSuffix = `<span class="session-id-suffix">#${s.sessionId.substring(0, 8)}</span>`;
+    const subagentBadge = s.subagentCount > 0
+      ? `<span class="subagent-badge" title="${s.subagentCount} subagent call${s.subagentCount === 1 ? '' : 's'}">&#10551; ${s.subagentCount}</span>`
+      : '';
     const models = s.models || (s.model ? [s.model] : []);
     const total = s.total ?? (s.input + s.output + s.cacheCreate + s.cacheRead);
     const modelHtml = models.length === 0 ? 'N/A'
       : models.map(m => `<span class="model-badge model-${shortModel(m).split('-')[0]}">${shortModel(m)}</span>`).join(' ');
     return `<tr class="session-row" data-sid="${s.sessionId}">
-      <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName}</td>
+      <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName} ${idSuffix} ${subagentBadge}</td>
       <td>${modelHtml}</td>
       <td>${started}</td>
       <td class="tok-input">${formatNum(s.input)}</td>

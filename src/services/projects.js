@@ -132,6 +132,7 @@ function getProjectDetail(folder, startDate, endDate) {
     const sessionId = jf.replace('.jsonl', '');
     let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
     let firstTs = null, lastTs = null, title = null;
+    let subagentCount = 0;
     const models = new Set();
     const modelUsage = {};
 
@@ -141,6 +142,11 @@ function getProjectDetail(folder, startDate, endDate) {
         try {
           const rec = JSON.parse(line);
           if (rec.type === 'ai-title' && rec.aiTitle) title = rec.aiTitle;
+          if (rec.type === 'assistant' && Array.isArray(rec.message?.content)) {
+            for (const b of rec.message.content) {
+              if (b.type === 'tool_use' && b.name === 'Agent') subagentCount++;
+            }
+          }
           if (rec.type === 'assistant' && rec.message?.usage) {
             const dt = rec.timestamp ? new Date(rec.timestamp) : null;
             if ((dtStart || dtEnd) && !dt) continue;
@@ -188,7 +194,7 @@ function getProjectDetail(folder, startDate, endDate) {
     const total = input + output + cacheCreate + cacheRead;
     if (total > 0) {
       sessions.push({
-        sessionId, title, models: [...models],
+        sessionId, title, subagentCount, models: [...models],
         input, output, cacheCreate, cacheRead, total, cost,
         modelUsage: Object.entries(modelUsage).map(([model, u]) => ({ model, ...u })),
         startedAt: firstTs ? firstTs.toISOString() : null,
@@ -322,7 +328,7 @@ function getSessionChat(folder, sessionId) {
               const usageMatch = resultContent.match(/<usage>([\s\S]*?)<\/usage>/);
               if (usageMatch) {
                 const uText = usageMatch[1];
-                const totalMatch = uText.match(/total_tokens:\s*(\d+)/);
+                const totalMatch = uText.match(/(?:subagent_tokens|total_tokens):\s*(\d+)/);
                 const toolMatch = uText.match(/tool_uses:\s*(\d+)/);
                 const durMatch = uText.match(/duration_ms:\s*(\d+)/);
                 part.agentUsage = {

@@ -941,6 +941,23 @@ body.widget-mode .widget-view {
   font-style: italic;
 }
 
+/* Session list: short id disambiguates identically auto-titled sessions;
+   subagent badge flags sessions that delegated to subagents. */
+.session-id-suffix {
+  font-size: 10px;
+  color: var(--subtext);
+  font-family: monospace;
+  opacity: 0.7;
+}
+.subagent-badge {
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
 /* ── Analytics tab ────────────────────────────────────────────────── */
 .analytics-summary {
   display: grid;
