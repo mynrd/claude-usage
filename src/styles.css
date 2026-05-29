@@ -700,6 +700,20 @@ html { height: 100%; overflow: hidden; }
   max-height: 150px;
   overflow-y: auto;
 }
+.chat-json {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: var(--ide-code-bg);
+  border: 1px solid var(--ide-code-bd);
+  border-radius: 6px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--code-text);
+}
+.chat-json code { font-family: inherit; }
 .chat-image { margin: 6px 0; }
 .chat-image img {
   max-width: 100%;
@@ -900,6 +914,34 @@ body.widget-mode .widget-view {
   color: var(--subtext);
   font-style: italic;
   margin-left: 4px;
+}
+
+/* Subagent delegation card — kept visually distinct so the parent message's
+   model badge is never mistaken for the model the subagent runs on. */
+.chat-agent-call {
+  flex-direction: column;
+  gap: 6px;
+  border-left: 3px solid var(--accent);
+}
+.agent-call-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.agent-badge {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.agent-name {
+  font-weight: 700;
+  font-size: 12px;
+}
+.agent-model-src {
+  font-size: 10px;
+  color: var(--subtext);
+  font-style: italic;
 }
 
 /* ── Analytics tab ────────────────────────────────────────────────── */

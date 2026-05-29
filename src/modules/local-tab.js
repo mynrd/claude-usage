@@ -275,7 +275,6 @@ function initModelDetailModal() {
   `;
   document.body.appendChild(overlay);
   document.getElementById('modal-close').addEventListener('click', () => overlay.classList.add('hidden'));
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.add('hidden'); });
 }
 
 function showModelDetailModal(session) {

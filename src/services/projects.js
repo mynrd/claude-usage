@@ -241,9 +241,39 @@ function getTodayLocalSummary() {
   return { input, output, cacheCreate, cacheRead, total: input + output + cacheCreate + cacheRead, cost };
 }
 
+const _agentModelCache = {};
+// Resolve a subagent's default model from its definition file's frontmatter.
+// Looks in the project-local .claude/agents first, then the global ~/.claude/agents.
+// Returns null when no definition is found (caller treats that as "inherits parent").
+function resolveAgentDefaultModel(projectPath, agentType) {
+  if (!agentType) return null;
+  const key = (projectPath || '') + '|' + agentType;
+  if (key in _agentModelCache) return _agentModelCache[key];
+
+  const candidates = [];
+  if (projectPath) candidates.push(path.join(projectPath, '.claude', 'agents', agentType + '.md'));
+  candidates.push(path.join(os.homedir(), '.claude', 'agents', agentType + '.md'));
+
+  let model = null;
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, 'utf8');
+      const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (!fm) continue;
+      const m = fm[1].match(/^model:\s*(.+?)\s*$/m);
+      if (m) { model = m[1].trim(); break; }
+    } catch {}
+  }
+  _agentModelCache[key] = model;
+  return model;
+}
+
 function getSessionChat(folder, sessionId) {
   const fpath = path.join(getClaudeProjectsDir(), folder, sessionId + '.jsonl');
   if (!fs.existsSync(fpath)) return [];
+
+  const { fullPath: projectPath } = resolveProjectName(folder);
 
   const messages = [];
   for (const line of fs.readFileSync(fpath, 'utf8').trim().split('\n')) {
@@ -269,7 +299,15 @@ function getSessionChat(folder, sessionId) {
               const part = { type: 'tool_use', tool: block.name, input: inputStr };
               if (block.name === 'Agent') {
                 part.agentType = block.input?.subagent_type || null;
-                part.agentModel = block.input?.model || null;
+                const override = block.input?.model || null;
+                if (override) {
+                  part.agentModel = override;
+                  part.agentModelSource = 'override';
+                } else {
+                  const def = resolveAgentDefaultModel(projectPath, part.agentType);
+                  part.agentModel = def;                       // null => inherits parent
+                  part.agentModelSource = def ? 'default' : 'inherit';
+                }
               }
               parts.push(part);
             } else if (block.type === 'tool_result') {
