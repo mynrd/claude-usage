@@ -142,14 +142,14 @@ function renderChatParts(parts, highlight) {
     }
     if (p.type === 'tool_result') {
       const cls = p.isError ? 'tool-result tool-error' : 'tool-result';
-      const text = p.content.length > 2000 ? p.content.substring(0, 2000) + '\n...(truncated)' : p.content;
+      const text = p.content;
       let agentInfo = '';
       if (p.agentUsage) {
         const u = p.agentUsage;
         const dur = u.durationMs > 0 ? `${(u.durationMs / 1000).toFixed(1)}s` : '';
         agentInfo = `<div class="agent-usage-bar">Agent: ${formatNum(u.totalTokens)} tokens &middot; ${u.toolUses} tool calls${dur ? ` &middot; ${dur}` : ''}</div>`;
       }
-      return `${agentInfo}<div class="${cls}">${highlightText(escapeHtml(text), highlight)}</div>`;
+      return `${agentInfo}<div class="${cls}">${renderJsonAware(text, highlight)}</div>`;
     }
     if (p.type === 'image') {
       const src = `data:${p.mediaType};base64,${p.data}`;

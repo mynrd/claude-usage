@@ -296,7 +296,7 @@ function getSessionChat(folder, sessionId) {
               else if (block.name === 'Edit' || block.name === 'Write' || block.name === 'Read') inputStr = block.input?.file_path || '';
               else if (block.name === 'Glob' || block.name === 'Grep') inputStr = block.input?.pattern  || '';
               else    inputStr = JSON.stringify(block.input || {});
-              const part = { type: 'tool_use', tool: block.name, input: inputStr };
+              const part = { type: 'tool_use', tool: block.name, input: inputStr, id: block.id };
               if (block.name === 'Agent') {
                 part.agentType = block.input?.subagent_type || null;
                 const override = block.input?.model || null;
@@ -312,8 +312,13 @@ function getSessionChat(folder, sessionId) {
               parts.push(part);
             } else if (block.type === 'tool_result') {
               const resultContent = typeof block.content === 'string' ? block.content
-                : Array.isArray(block.content) ? block.content.map(b => b.text || '').join('\n') : '';
-              const part = { type: 'tool_result', content: resultContent, isError: block.is_error || false };
+                : Array.isArray(block.content) ? block.content.map(b => {
+                    if (typeof b === 'string') return b;
+                    if (b.text) return b.text;
+                    if (b.type === 'tool_reference') return b.tool_name || '';
+                    return JSON.stringify(b);
+                  }).join('\n') : '';
+              const part = { type: 'tool_result', content: resultContent, isError: block.is_error || false, toolUseId: block.tool_use_id || null };
               const usageMatch = resultContent.match(/<usage>([\s\S]*?)<\/usage>/);
               if (usageMatch) {
                 const uText = usageMatch[1];
@@ -355,7 +360,42 @@ function getSessionChat(folder, sessionId) {
       }
     } catch {}
   }
-  return messages;
+  return reorderToolResults(messages);
+}
+
+// Tool calls fired in parallel get their results streamed back interleaved and
+// out of order in the JSONL. Re-place each single tool_result message directly
+// after the message containing its matching tool_use, so call -> result stays
+// adjacent in the chat view. Orphan results (no tool_use_id) and batched
+// multi-result messages keep their original position.
+function reorderToolResults(messages) {
+  const movable = new Map(); // tool_use_id -> result message
+  for (const m of messages) {
+    if (m.parts.length === 1 && m.parts[0].type === 'tool_result' && m.parts[0].toolUseId) {
+      m.__key = m.parts[0].toolUseId;
+      movable.set(m.__key, m);
+    }
+  }
+  if (movable.size === 0) return messages;
+
+  const out = [];
+  const placed = new Set();
+  for (const m of messages) {
+    if (m.__key) continue; // a movable result — emitted via its call below
+    out.push(m);
+    for (const p of m.parts) {
+      if (p.type === 'tool_use' && p.id && movable.has(p.id) && !placed.has(p.id)) {
+        out.push(movable.get(p.id));
+        placed.add(p.id);
+      }
+    }
+  }
+  // results whose call wasn't found — keep them rather than drop
+  for (const m of messages) {
+    if (m.__key && !placed.has(m.__key)) out.push(m);
+  }
+  for (const m of out) delete m.__key;
+  return out;
 }
 
 function searchSessions(folder, query) {

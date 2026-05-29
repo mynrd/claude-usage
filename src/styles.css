@@ -660,8 +660,6 @@ html { height: 100%; overflow: hidden; }
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--subtext);
-  max-height: 200px;
-  overflow-y: auto;
 }
 .tool-error { background: var(--error-bg); border-color: var(--error-bd); color: var(--error-text); }
 .ide-context {
@@ -697,8 +695,6 @@ html { height: 100%; overflow: hidden; }
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 150px;
-  overflow-y: auto;
 }
 .chat-json {
   margin: 6px 0;
@@ -709,8 +705,8 @@ html { height: 100%; overflow: hidden; }
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
   color: var(--code-text);
 }
 .chat-json code { font-family: inherit; }
