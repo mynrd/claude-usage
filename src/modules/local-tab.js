@@ -1,6 +1,7 @@
 import { estimateCost, formatCost } from './pricing.js';
 import { formatNum } from './utils.js';
 import { openSessionChat } from './chat-viewer.js';
+import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
 
 let currentProjects = [];
 let activeProjectFolder = null;
@@ -18,7 +19,7 @@ function getDateRange() {
 
 export async function loadLocalUsage() {
   const { from, to } = getDateRange();
-  const projects = await window.api.listProjects(from, to);
+  const projects = await window.api.listProjects(from, to, getIncludeSubagents());
   currentProjects = projects;
 
   const totalInput       = projects.reduce((s, p) => s + p.totalInput,        0);
@@ -85,7 +86,7 @@ export async function loadLocalUsage() {
 
 async function loadProjectDetail(folder, name, fullPath) {
   const { from, to } = getDateRange();
-  const detail = await window.api.getProjectDetail(folder, from, to);
+  const detail = await window.api.getProjectDetail(folder, from, to, getIncludeSubagents());
   const panel = document.getElementById('project-detail');
 
   panel.innerHTML = `
@@ -160,7 +161,7 @@ function bindSessionClicks(sessEl, folder) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const s = sessionMap[btn.dataset.sid];
-      if (s) showModelDetailModal(s);
+      if (s) showModelDetailModal(s, folder);
     });
   });
 }
@@ -273,7 +274,7 @@ function initModelDetailModal() {
   overlay.innerHTML = `
     <div class="model-detail-card">
       <div class="model-detail-header">
-        <span class="model-detail-title">Model Usage — <em id="modal-session-title"></em></span>
+        <span class="model-detail-title">Usage — <em id="modal-session-title"></em></span>
         <button id="modal-close" class="modal-close-btn">×</button>
       </div>
       <div id="modal-body"></div>
@@ -283,51 +284,114 @@ function initModelDetailModal() {
   document.getElementById('modal-close').addEventListener('click', () => overlay.classList.add('hidden'));
 }
 
-function showModelDetailModal(session) {
+const tc = (n, c) => `${formatNum(n)} <span class="tok-cost">(${formatCost(c)})</span>`;
+
+function renderModelTable(usage) {
+  const rows = usage.map(m => `
+    <tr>
+      <td><span class="model-badge model-${shortModel(m.model).split('-')[0]}">${shortModel(m.model)}</span></td>
+      <td class="tok-input">${tc(m.input, m.inputCost || 0)}</td>
+      <td class="tok-cache">${tc(m.cacheCreate, m.cacheCreateCost || 0)}</td>
+      <td class="tok-cache">${tc(m.cacheRead, m.cacheReadCost || 0)}</td>
+      <td class="tok-output">${tc(m.output, m.outputCost || 0)}</td>
+      <td class="cost-badge">${formatCost(m.cost)}</td>
+    </tr>`).join('');
+  const tot = usage.reduce((a, m) => {
+    a.output += m.output; a.outputCost += m.outputCost || 0;
+    a.cacheCreate += m.cacheCreate; a.cacheCreateCost += m.cacheCreateCost || 0;
+    a.cacheRead += m.cacheRead; a.cacheReadCost += m.cacheReadCost || 0;
+    a.input += m.input; a.inputCost += m.inputCost || 0;
+    a.cost += m.cost;
+    return a;
+  }, { output: 0, outputCost: 0, cacheCreate: 0, cacheCreateCost: 0, cacheRead: 0, cacheReadCost: 0, input: 0, inputCost: 0, cost: 0 });
+  return `
+    <table class="model-detail-table">
+      <thead><tr>
+        <th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Total</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr>
+        <td><strong>Total</strong></td>
+        <td>${tc(tot.input, tot.inputCost)}</td>
+        <td>${tc(tot.cacheCreate, tot.cacheCreateCost)}</td>
+        <td>${tc(tot.cacheRead, tot.cacheReadCost)}</td>
+        <td>${tc(tot.output, tot.outputCost)}</td>
+        <td class="cost-badge"><strong>${formatCost(tot.cost)}</strong></td>
+      </tr></tfoot>
+    </table>`;
+}
+
+function renderSubagentTable(sub) {
+  const rows = sub.agents.map(a => {
+    const modelHtml = a.models.length
+      ? a.models.map(m => `<span class="model-badge model-${shortModel(m).split('-')[0]}">${shortModel(m)}</span>`).join(' ')
+      : '<span class="subtle">—</span>';
+    return `
+      <tr>
+        <td class="subagent-name">${a.name}${a.spawns > 1 ? ` <span class="spawn-count" title="${a.spawns} spawns">×${a.spawns}</span>` : ''}</td>
+        <td>${modelHtml}</td>
+        <td class="tok-input">${tc(a.input, a.inputCost || 0)}</td>
+        <td class="tok-cache">${tc(a.cacheCreate, a.cacheCreateCost || 0)}</td>
+        <td class="tok-cache">${tc(a.cacheRead, a.cacheReadCost || 0)}</td>
+        <td class="tok-output">${tc(a.output, a.outputCost || 0)}</td>
+        <td class="tok-total">${formatNum(a.total)}</td>
+        <td class="cost-badge">${formatCost(a.cost)}</td>
+      </tr>`;
+  }).join('');
+  const t = sub.totals;
+  return `
+    <table class="model-detail-table subagent-table">
+      <thead><tr>
+        <th>Teammate / Subagent</th><th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Tokens</th><th>Cost</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr>
+        <td><strong>Total</strong></td><td></td>
+        <td>${tc(t.input, t.inputCost || 0)}</td>
+        <td>${tc(t.cacheCreate, t.cacheCreateCost || 0)}</td>
+        <td>${tc(t.cacheRead, t.cacheReadCost || 0)}</td>
+        <td>${tc(t.output, t.outputCost || 0)}</td>
+        <td class="tok-total"><strong>${formatNum(t.total)}</strong></td>
+        <td class="cost-badge"><strong>${formatCost(t.cost)}</strong></td>
+      </tr></tfoot>
+    </table>`;
+}
+
+async function showModelDetailModal(session, folder) {
   const overlay = document.getElementById('model-detail-overlay');
   const body    = document.getElementById('modal-body');
   document.getElementById('modal-session-title').textContent =
     session.title || session.sessionId.substring(0, 12) + '…';
 
   const usage = session.modelUsage || [];
-  if (!usage.length) {
-    body.innerHTML = '<div class="empty-state">No model breakdown available</div>';
-  } else {
-    const tc = (n, c) => `${formatNum(n)} <span class="tok-cost">(${formatCost(c)})</span>`;
-    const rows = usage.map(m => `
-      <tr>
-        <td><span class="model-badge model-${shortModel(m.model).split('-')[0]}">${shortModel(m.model)}</span></td>
-        <td class="tok-input">${tc(m.input, m.inputCost || 0)}</td>
-        <td class="tok-cache">${tc(m.cacheCreate, m.cacheCreateCost || 0)}</td>
-        <td class="tok-cache">${tc(m.cacheRead, m.cacheReadCost || 0)}</td>
-        <td class="tok-output">${tc(m.output, m.outputCost || 0)}</td>
-        <td class="cost-badge">${formatCost(m.cost)}</td>
-      </tr>`).join('');
-    const tot = usage.reduce((a, m) => {
-      a.output += m.output; a.outputCost += m.outputCost || 0;
-      a.cacheCreate += m.cacheCreate; a.cacheCreateCost += m.cacheCreateCost || 0;
-      a.cacheRead += m.cacheRead; a.cacheReadCost += m.cacheReadCost || 0;
-      a.input += m.input; a.inputCost += m.inputCost || 0;
-      a.cost += m.cost;
-      return a;
-    }, { output: 0, outputCost: 0, cacheCreate: 0, cacheCreateCost: 0, cacheRead: 0, cacheReadCost: 0, input: 0, inputCost: 0, cost: 0 });
-    body.innerHTML = `
-      <table class="model-detail-table">
-        <thead><tr>
-          <th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Total</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-        <tfoot><tr>
-          <td><strong>Total</strong></td>
-          <td>${tc(tot.input, tot.inputCost)}</td>
-          <td>${tc(tot.cacheCreate, tot.cacheCreateCost)}</td>
-          <td>${tc(tot.cacheRead, tot.cacheReadCost)}</td>
-          <td>${tc(tot.output, tot.outputCost)}</td>
-          <td class="cost-badge"><strong>${formatCost(tot.cost)}</strong></td>
-        </tr></tfoot>
-      </table>`;
-  }
+  const mainCost = usage.reduce((s, m) => s + (m.cost || 0), 0);
+  const mainTotal = usage.reduce((s, m) => s + m.input + m.output + m.cacheCreate + m.cacheRead, 0);
+
+  body.innerHTML = `
+    <div class="modal-section-label">Main thread</div>
+    ${usage.length ? renderModelTable(usage) : '<div class="empty-state">No model breakdown available</div>'}
+    <div id="subagent-section"><div class="subtle" style="padding:8px 0">Loading team / subagent usage…</div></div>`;
   overlay.classList.remove('hidden');
+
+  let sub = null;
+  try { sub = await window.api.getSessionSubagents(folder, session.sessionId); } catch { /* ignore */ }
+  const section = document.getElementById('subagent-section');
+  if (!section) return; // modal closed before load finished
+
+  if (!sub || !sub.agentCount) {
+    section.innerHTML = '';
+    return;
+  }
+
+  const grandTotal = mainTotal + sub.totals.total;
+  const grandCost  = mainCost + sub.totals.cost;
+  section.innerHTML = `
+    <div class="modal-section-label">Subagents &amp; team <span class="spawn-count">${sub.agentCount} transcript${sub.agentCount === 1 ? '' : 's'}</span></div>
+    ${renderSubagentTable(sub)}
+    <div class="grand-total-bar">
+      <span>Session + subagents</span>
+      <span class="grand-total-figures">${formatNum(grandTotal)} tokens &middot; <span class="cost-badge">${formatCost(grandCost)}</span></span>
+    </div>`;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -343,6 +407,15 @@ export function initLocalTab() {
   document.getElementById('btn-clear-dates').addEventListener('click', () => {
     document.getElementById('local-date-from').value = '';
     document.getElementById('local-date-to').value = '';
+    loadLocalUsage();
+  });
+
+  const toggle = document.getElementById('toggle-subagents-local');
+  toggle.checked = getIncludeSubagents();
+  toggle.addEventListener('change', (e) => {
+    setIncludeSubagents(e.target.checked);
+    const other = document.getElementById('toggle-subagents-analytics');
+    if (other) other.checked = e.target.checked;
     loadLocalUsage();
   });
 }

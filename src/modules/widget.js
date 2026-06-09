@@ -1,10 +1,11 @@
 import { estimateCost, formatCost } from './pricing.js';
 import { formatNum } from './utils.js';
+import { getIncludeSubagents } from './settings.js';
 
 async function enterWidget() {
   const localEl = document.getElementById('widget-local');
   try {
-    const today = await window.api.getTodaySummary();
+    const today = await window.api.getTodaySummary(getIncludeSubagents());
     const todayCost = today.cost != null
       ? today.cost
       : estimateCost(today.input, today.output, today.cacheCreate || 0, today.cacheRead || 0, null);

@@ -393,6 +393,18 @@ html { height: 100%; overflow: hidden; }
   align-items: center;
   gap: 6px;
 }
+.subagent-toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--subtext);
+  cursor: pointer;
+  user-select: none;
+}
+.subagent-toggle input { cursor: pointer; accent-color: var(--accent); }
 .date-input {
   padding: 4px 8px;
   border: 1px solid var(--card-bd);
@@ -711,6 +723,70 @@ html { height: 100%; overflow: hidden; }
   color: var(--code-text);
 }
 .chat-json code { font-family: inherit; }
+
+/* Agent-teams teammate messages. --tm-color is set inline per card. */
+.chat-teammates {
+  background: transparent;
+  border: none;
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  gap: 6px;
+  display: flex;
+  flex-direction: column;
+}
+.tm-msg {
+  margin: 4px 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--tm-color) 7%, var(--card-bg));
+  border: 1px solid color-mix(in srgb, var(--tm-color) 28%, var(--card-bd));
+  border-left: 3px solid var(--tm-color);
+  border-radius: 6px;
+}
+.tm-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.tm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tm-color);
+  flex-shrink: 0;
+}
+.tm-name {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--tm-color);
+}
+.tm-status {
+  font-size: 11px;
+  color: var(--subtext);
+  font-style: italic;
+}
+.tm-summary {
+  font-size: 11px;
+  color: var(--subtext);
+  margin: 2px 0 0 15px;
+}
+.tm-body {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+}
+.tm-body .chat-json { margin: 6px 0 0; }
+/* Idle/status pings carry no body — keep them quiet. */
+.tm-status-only {
+  padding: 4px 12px;
+  background: transparent;
+  border-color: transparent;
+  border-left-color: color-mix(in srgb, var(--tm-color) 45%, transparent);
+  opacity: 0.7;
+}
+.tm-status-only .tm-name { font-weight: 600; }
 .chat-image { margin: 6px 0; }
 .chat-image img {
   max-width: 100%;
@@ -1034,7 +1110,7 @@ body.widget-mode .widget-view {
   border-radius: var(--radius);
   padding: 20px 24px;
   min-width: 520px;
-  max-width: 720px;
+  max-width: 860px;
   width: 90%;
   max-height: 80vh;
   overflow-y: auto;
@@ -1087,6 +1163,44 @@ body.widget-mode .widget-view {
   border-top: 2px solid var(--card-bd);
   border-bottom: none;
 }
+.modal-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--subtext);
+  margin: 18px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.modal-section-label:first-child { margin-top: 0; }
+.subagent-table { table-layout: auto; }
+.subagent-name { font-weight: 600; color: var(--text); }
+.spawn-count {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--active-item-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.subtle { color: var(--subtext); font-size: 12px; }
+.grand-total-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--active-item-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.grand-total-figures { font-weight: 600; }
 .btn-detail {
   font-size: 10px;
   padding: 2px 7px;

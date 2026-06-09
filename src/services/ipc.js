@@ -1,17 +1,18 @@
 const { ipcMain } = require('electron');
 const { loadConfig, saveConfig } = require('./config');
-const { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, searchSessions, getAggregatedDailyTotals } = require('./projects');
+const { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals } = require('./projects');
 
 function setupIpc(getMainWindow) {
   ipcMain.handle('get-config',  ()         => loadConfig());
   ipcMain.handle('save-config', (_, cfg)   => { saveConfig(cfg); return true; });
 
-  ipcMain.handle('list-projects',          (_, opts) => listLocalProjects(opts?.startDate || null, opts?.endDate || null));
-  ipcMain.handle('get-project-detail',     (_, opts) => getProjectDetail(opts?.folder, opts?.startDate || null, opts?.endDate || null));
+  ipcMain.handle('list-projects',          (_, opts) => listLocalProjects(opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
+  ipcMain.handle('get-project-detail',     (_, opts) => getProjectDetail(opts?.folder, opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
   ipcMain.handle('search-sessions',        (_, opts) => searchSessions(opts?.folder, opts?.query));
   ipcMain.handle('get-session-chat',       (_, opts) => getSessionChat(opts?.folder, opts?.sessionId));
-  ipcMain.handle('get-today-summary',      ()        => getTodayLocalSummary());
-  ipcMain.handle('get-analytics-data',     (_, opts) => getAggregatedDailyTotals(opts?.startDate || null, opts?.endDate || null));
+  ipcMain.handle('get-session-subagents',  (_, opts) => getSessionSubagents(opts?.folder, opts?.sessionId));
+  ipcMain.handle('get-today-summary',      (_, opts) => getTodayLocalSummary(!!opts?.includeSub));
+  ipcMain.handle('get-analytics-data',     (_, opts) => getAggregatedDailyTotals(opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
 
   ipcMain.handle('enter-widget-mode', () => {
     const win = getMainWindow();

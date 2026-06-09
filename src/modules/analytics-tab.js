@@ -1,5 +1,6 @@
 import { formatNum } from './utils.js';
 import { formatCost } from './pricing.js';
+import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
 
 let chartDailyTokens  = null;
 let chartDailyCost    = null;
@@ -17,7 +18,7 @@ function getDateRange() {
 
 export async function loadAnalytics() {
   const { from, to } = getDateRange();
-  const data = await window.api.getAnalyticsData(from, to);
+  const data = await window.api.getAnalyticsData(from, to, getIncludeSubagents());
 
   renderSummary(data);
   renderDailyTokensChart(data.dailyTotals);
@@ -266,6 +267,15 @@ export function initAnalyticsTab() {
   document.getElementById('btn-clear-analytics-dates').addEventListener('click', () => {
     document.getElementById('analytics-date-from').value = '';
     document.getElementById('analytics-date-to').value = '';
+    loadAnalytics();
+  });
+
+  const toggle = document.getElementById('toggle-subagents-analytics');
+  toggle.checked = getIncludeSubagents();
+  toggle.addEventListener('change', (e) => {
+    setIncludeSubagents(e.target.checked);
+    const other = document.getElementById('toggle-subagents-local');
+    if (other) other.checked = e.target.checked;
     loadAnalytics();
   });
 }

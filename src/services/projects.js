@@ -42,7 +42,7 @@ function resolveProjectName(folder) {
   return { displayName: path.basename(currentPath), fullPath: currentPath.replace(/\\/g, '/') };
 }
 
-function listLocalProjects(startDate, endDate) {
+function listLocalProjects(startDate, endDate, includeSub = false) {
   const dir = getClaudeProjectsDir();
   if (!fs.existsSync(dir)) return [];
 
@@ -99,6 +99,19 @@ function listLocalProjects(startDate, endDate) {
         totalCacheRead += sCacheRead;
         totalCost += sCost;
       }
+
+      if (includeSub) {
+        const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
+        if (sub.agentCount) {
+          const s = sumSubagentRange(sub.daily, dtStart, dtEnd);
+          if (s.input || s.output || s.cacheCreate || s.cacheRead) {
+            totalInput += s.input; totalOutput += s.output;
+            totalCacheCreate += s.cacheCreate; totalCacheRead += s.cacheRead;
+            totalCost += s.cost;
+            hasMatchingRecords = true;
+          }
+        }
+      }
     }
 
     if ((!dtStart && !dtEnd) || hasMatchingRecords) {
@@ -118,7 +131,7 @@ function listLocalProjects(startDate, endDate) {
   });
 }
 
-function getProjectDetail(folder, startDate, endDate) {
+function getProjectDetail(folder, startDate, endDate, includeSub = false) {
   const dir = path.join(getClaudeProjectsDir(), folder);
   if (!fs.existsSync(dir)) return { sessions: [], dailyTotals: [] };
 
@@ -191,6 +204,28 @@ function getProjectDetail(folder, startDate, endDate) {
       }
     } catch {}
 
+    if (includeSub) {
+      const sub = getSessionSubagents(folder, sessionId);
+      if (sub.agentCount) {
+        const s = sumSubagentRange(sub.daily, dtStart, dtEnd);
+        input += s.input; output += s.output;
+        cacheCreate += s.cacheCreate; cacheRead += s.cacheRead;
+        cost += s.cost;
+        // Roll subagent spend into the per-day totals for this project's chart.
+        for (const [day, v] of Object.entries(sub.daily)) {
+          if (dtStart || dtEnd) {
+            const d = new Date(day + 'T12:00:00');
+            if (dtStart && d < dtStart) continue;
+            if (dtEnd && d > dtEnd) continue;
+          }
+          if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+          dailyMap[day].input += v.input; dailyMap[day].output += v.output;
+          dailyMap[day].cacheCreate += v.cacheCreate; dailyMap[day].cacheRead += v.cacheRead;
+          dailyMap[day].cost += v.cost;
+        }
+      }
+    }
+
     const total = input + output + cacheCreate + cacheRead;
     if (total > 0) {
       sessions.push({
@@ -212,7 +247,7 @@ function getProjectDetail(folder, startDate, endDate) {
   return { sessions, dailyTotals: Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date)) };
 }
 
-function getTodayLocalSummary() {
+function getTodayLocalSummary(includeSub = false) {
   const dir = getClaudeProjectsDir();
   if (!fs.existsSync(dir)) return { input: 0, output: 0, total: 0, cost: 0 };
 
@@ -242,6 +277,15 @@ function getTodayLocalSummary() {
           } catch {}
         }
       } catch {}
+
+      if (includeSub) {
+        const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
+        const d = sub.daily && sub.daily[today];
+        if (d) {
+          input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
+          cost += d.cost;
+        }
+      }
     }
   }
   return { input, output, cacheCreate, cacheRead, total: input + output + cacheCreate + cacheRead, cost };
@@ -369,6 +413,133 @@ function getSessionChat(folder, sessionId) {
   return reorderToolResults(messages);
 }
 
+// Subagent / agent-teams transcripts live in <folder>/<sessionId>/subagents/agent-*.jsonl
+// and are NOT reflected in the session's headline totals (which cover only the main
+// thread). Parse them and aggregate token spend per teammate, so the detail modal can
+// surface the (often much larger) team cost.
+//
+// These transcripts are large (tens of MB for an active team), so results are cached
+// keyed by a cheap signature (file count + sizes + mtimes); unchanged sessions are not
+// re-parsed. The cache makes the "include subagents" fold-in across every project load
+// affordable.
+const _subagentCache = new Map();
+
+function subagentDirSignature(subdir) {
+  try {
+    const files = fs.readdirSync(subdir).filter(f => f.endsWith('.jsonl')).sort();
+    return files.map(f => {
+      const st = fs.statSync(path.join(subdir, f));
+      return `${f}:${st.size}:${Math.round(st.mtimeMs)}`;
+    }).join('|');
+  } catch { return ''; }
+}
+
+function getSessionSubagents(folder, sessionId) {
+  const subdir = path.join(getClaudeProjectsDir(), folder, sessionId, 'subagents');
+  if (!fs.existsSync(subdir)) return { agentCount: 0, agents: [], totals: null, daily: {} };
+
+  const cacheKey = folder + '/' + sessionId;
+  const sig = subagentDirSignature(subdir);
+  const cached = _subagentCache.get(cacheKey);
+  if (cached && cached.sig === sig) return cached.result;
+
+  const byName = {};
+  const totals = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0 };
+  const daily = {}; // day -> { input, output, cacheCreate, cacheRead, cost }
+  let agentCount = 0;
+
+  for (const jf of fs.readdirSync(subdir).filter(f => f.endsWith('.jsonl'))) {
+    let firstUser = null;
+    let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0, toolUses = 0, turns = 0;
+    let inputCost = 0, outputCost = 0, cacheCreateCost = 0, cacheReadCost = 0;
+    const models = new Set();
+
+    try {
+      for (const line of fs.readFileSync(path.join(subdir, jf), 'utf8').trim().split('\n')) {
+        if (!line) continue;
+        try {
+          const rec = JSON.parse(line);
+          if (firstUser === null && rec.type === 'user' && typeof rec.message?.content === 'string') {
+            firstUser = rec.message.content;
+          }
+          if (rec.type === 'assistant' && Array.isArray(rec.message?.content)) {
+            for (const b of rec.message.content) if (b.type === 'tool_use') toolUses++;
+          }
+          if (rec.type === 'assistant' && rec.message?.usage) {
+            const u = rec.message.usage;
+            const model = rec.message.model || null;
+            const day = rec.timestamp ? new Date(rec.timestamp).toISOString().split('T')[0] : null;
+            const bd = calcCostBreakdown(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, model, day);
+            const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
+            const iT = u.input_tokens || 0, oT = u.output_tokens || 0;
+            const ccT = u.cache_creation_input_tokens || 0, crT = u.cache_read_input_tokens || 0;
+            input += iT; output += oT; cacheCreate += ccT; cacheRead += crT;
+            cost += recCost;
+            inputCost += bd.input; outputCost += bd.output;
+            cacheCreateCost += bd.cacheCreate; cacheReadCost += bd.cacheRead;
+            turns++;
+            if (model && model !== '<synthetic>') models.add(model);
+            if (day) {
+              if (!daily[day]) daily[day] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+              daily[day].input += iT; daily[day].output += oT;
+              daily[day].cacheCreate += ccT; daily[day].cacheRead += crT;
+              daily[day].cost += recCost;
+            }
+          }
+        } catch {}
+      }
+    } catch { continue; }
+
+    const total = input + output + cacheCreate + cacheRead;
+    if (total === 0 && toolUses === 0) continue;
+    agentCount++;
+
+    // Agent-teams teammates self-identify as: You are "name". Generic Task
+    // subagents have no such line — fall back to a neutral label.
+    const idMatch = firstUser && firstUser.match(/You are ["“]([^"”]+)["”]/);
+    const name = (idMatch && idMatch[1]) || 'subagent';
+
+    const g = byName[name] || (byName[name] = { name, spawns: 0, models: new Set(), input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
+    g.spawns++;
+    g.input += input; g.output += output; g.cacheCreate += cacheCreate; g.cacheRead += cacheRead;
+    g.total += total; g.cost += cost; g.toolUses += toolUses; g.turns += turns;
+    g.inputCost += inputCost; g.outputCost += outputCost; g.cacheCreateCost += cacheCreateCost; g.cacheReadCost += cacheReadCost;
+    for (const m of models) g.models.add(m);
+
+    totals.input += input; totals.output += output; totals.cacheCreate += cacheCreate;
+    totals.cacheRead += cacheRead; totals.total += total; totals.cost += cost;
+    totals.inputCost += inputCost; totals.outputCost += outputCost;
+    totals.cacheCreateCost += cacheCreateCost; totals.cacheReadCost += cacheReadCost;
+  }
+
+  const agents = Object.values(byName)
+    .map(g => ({ ...g, models: [...g.models] }))
+    .sort((a, b) => b.cost - a.cost || b.total - a.total);
+
+  const result = { agentCount, agents, totals: agentCount ? totals : null, daily };
+  _subagentCache.set(cacheKey, { sig, result });
+  return result;
+}
+
+// Sum a subagent daily-breakdown map over an optional [dtStart, dtEnd] window.
+// Day-granular (subagent records are bucketed by calendar day); date filters are
+// day-aligned so this matches the main-thread per-record filtering closely enough.
+function sumSubagentRange(daily, dtStart, dtEnd) {
+  const acc = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+  if (!daily) return acc;
+  for (const [day, v] of Object.entries(daily)) {
+    if (dtStart || dtEnd) {
+      const d = new Date(day + 'T12:00:00');
+      if (dtStart && d < dtStart) continue;
+      if (dtEnd && d > dtEnd) continue;
+    }
+    acc.input += v.input; acc.output += v.output;
+    acc.cacheCreate += v.cacheCreate; acc.cacheRead += v.cacheRead;
+    acc.cost += v.cost;
+  }
+  return acc;
+}
+
 // Tool calls fired in parallel get their results streamed back interleaved and
 // out of order in the JSONL. Re-place each single tool_result message directly
 // after the message containing its matching tool_use, so call -> result stays
@@ -438,7 +609,7 @@ function searchSessions(folder, query) {
   return [...matching];
 }
 
-function getAggregatedDailyTotals(startDate, endDate) {
+function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
   const dir = getClaudeProjectsDir();
   if (!fs.existsSync(dir)) return { dailyTotals: [], projectTotals: [] };
 
@@ -492,6 +663,24 @@ function getAggregatedDailyTotals(startDate, endDate) {
           } catch {}
         }
       } catch {}
+
+      if (includeSub) {
+        const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
+        if (sub.agentCount) {
+          for (const [day, v] of Object.entries(sub.daily)) {
+            if (dtStart || dtEnd) {
+              const d = new Date(day + 'T12:00:00');
+              if (dtStart && d < dtStart) continue;
+              if (dtEnd && d > dtEnd) continue;
+            }
+            pInput += v.input; pOutput += v.output; pCacheCreate += v.cacheCreate; pCacheRead += v.cacheRead; pCost += v.cost;
+            if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+            dailyMap[day].input += v.input; dailyMap[day].output += v.output;
+            dailyMap[day].cacheCreate += v.cacheCreate; dailyMap[day].cacheRead += v.cacheRead;
+            dailyMap[day].cost += v.cost;
+          }
+        }
+      }
     }
 
     const pTotal = pInput + pOutput + pCacheCreate + pCacheRead;
@@ -506,4 +695,4 @@ function getAggregatedDailyTotals(startDate, endDate) {
   return { dailyTotals, projectTotals };
 }
 
-module.exports = { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, searchSessions, getAggregatedDailyTotals };
+module.exports = { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals };
