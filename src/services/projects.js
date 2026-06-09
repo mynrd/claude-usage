@@ -448,11 +448,15 @@ function getSessionSubagents(folder, sessionId) {
   const daily = {}; // day -> { input, output, cacheCreate, cacheRead, cost }
   let agentCount = 0;
 
+  const newAcc = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
+
   for (const jf of fs.readdirSync(subdir).filter(f => f.endsWith('.jsonl'))) {
     let firstUser = null;
-    let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0, toolUses = 0, turns = 0;
-    let inputCost = 0, outputCost = 0, cacheCreateCost = 0, cacheReadCost = 0;
-    const models = new Set();
+    // Accumulate per model within the transcript — a subagent can run on more than
+    // one model (e.g. an opus thread that delegates a step to haiku), and those have
+    // different rate cards, so they must never be summed into one row.
+    const perModel = {};
+    const ensure = (m) => perModel[m] || (perModel[m] = newAcc());
 
     try {
       for (const line of fs.readFileSync(path.join(subdir, jf), 'utf8').trim().split('\n')) {
@@ -462,23 +466,25 @@ function getSessionSubagents(folder, sessionId) {
           if (firstUser === null && rec.type === 'user' && typeof rec.message?.content === 'string') {
             firstUser = rec.message.content;
           }
-          if (rec.type === 'assistant' && Array.isArray(rec.message?.content)) {
-            for (const b of rec.message.content) if (b.type === 'tool_use') toolUses++;
+          if (rec.type !== 'assistant') continue;
+          const model = rec.message?.model || null;
+          const mk = (model && model !== '<synthetic>') ? model : 'unknown';
+          if (Array.isArray(rec.message?.content)) {
+            for (const b of rec.message.content) if (b.type === 'tool_use') ensure(mk).toolUses++;
           }
-          if (rec.type === 'assistant' && rec.message?.usage) {
+          if (rec.message?.usage) {
             const u = rec.message.usage;
-            const model = rec.message.model || null;
             const day = rec.timestamp ? new Date(rec.timestamp).toISOString().split('T')[0] : null;
             const bd = calcCostBreakdown(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, model, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             const iT = u.input_tokens || 0, oT = u.output_tokens || 0;
             const ccT = u.cache_creation_input_tokens || 0, crT = u.cache_read_input_tokens || 0;
-            input += iT; output += oT; cacheCreate += ccT; cacheRead += crT;
-            cost += recCost;
-            inputCost += bd.input; outputCost += bd.output;
-            cacheCreateCost += bd.cacheCreate; cacheReadCost += bd.cacheRead;
-            turns++;
-            if (model && model !== '<synthetic>') models.add(model);
+            const e = ensure(mk);
+            e.input += iT; e.output += oT; e.cacheCreate += ccT; e.cacheRead += crT;
+            e.cost += recCost;
+            e.inputCost += bd.input; e.outputCost += bd.output;
+            e.cacheCreateCost += bd.cacheCreate; e.cacheReadCost += bd.cacheRead;
+            e.turns++;
             if (day) {
               if (!daily[day]) daily[day] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
               daily[day].input += iT; daily[day].output += oT;
@@ -490,30 +496,46 @@ function getSessionSubagents(folder, sessionId) {
       }
     } catch { continue; }
 
-    const total = input + output + cacheCreate + cacheRead;
-    if (total === 0 && toolUses === 0) continue;
-    agentCount++;
+    // Identity, most authoritative first:
+    //  1. the agent-<id>.meta.json sidecar carries the spawning agentType
+    //     (e.g. "designer", "Explore", "angular-expert") — present for both
+    //     plain Task subagents and team members.
+    //  2. agent-teams members also self-identify as: You are "name".
+    //  3. otherwise a neutral fallback.
+    let name = null;
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(subdir, jf.replace(/\.jsonl$/, '.meta.json')), 'utf8'));
+      if (meta && meta.agentType) name = meta.agentType;
+    } catch { /* no sidecar */ }
+    if (!name) {
+      const idMatch = firstUser && firstUser.match(/You are ["“]([^"”]+)["”]/);
+      name = (idMatch && idMatch[1]) || 'subagent';
+    }
 
-    // Agent-teams teammates self-identify as: You are "name". Generic Task
-    // subagents have no such line — fall back to a neutral label.
-    const idMatch = firstUser && firstUser.match(/You are ["“]([^"”]+)["”]/);
-    const name = (idMatch && idMatch[1]) || 'subagent';
+    let fileHadActivity = false;
+    for (const [mk, e] of Object.entries(perModel)) {
+      const total = e.input + e.output + e.cacheCreate + e.cacheRead;
+      if (total === 0 && e.toolUses === 0) continue;
+      fileHadActivity = true;
 
-    const g = byName[name] || (byName[name] = { name, spawns: 0, models: new Set(), input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
-    g.spawns++;
-    g.input += input; g.output += output; g.cacheCreate += cacheCreate; g.cacheRead += cacheRead;
-    g.total += total; g.cost += cost; g.toolUses += toolUses; g.turns += turns;
-    g.inputCost += inputCost; g.outputCost += outputCost; g.cacheCreateCost += cacheCreateCost; g.cacheReadCost += cacheReadCost;
-    for (const m of models) g.models.add(m);
+      // One row per (teammate, model) so each row maps to a single rate card.
+      const key = name + ' ' + mk;
+      const g = byName[key] || (byName[key] = { name, model: mk, spawns: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
+      g.spawns++;
+      g.input += e.input; g.output += e.output; g.cacheCreate += e.cacheCreate; g.cacheRead += e.cacheRead;
+      g.total += total; g.cost += e.cost; g.toolUses += e.toolUses; g.turns += e.turns;
+      g.inputCost += e.inputCost; g.outputCost += e.outputCost; g.cacheCreateCost += e.cacheCreateCost; g.cacheReadCost += e.cacheReadCost;
 
-    totals.input += input; totals.output += output; totals.cacheCreate += cacheCreate;
-    totals.cacheRead += cacheRead; totals.total += total; totals.cost += cost;
-    totals.inputCost += inputCost; totals.outputCost += outputCost;
-    totals.cacheCreateCost += cacheCreateCost; totals.cacheReadCost += cacheReadCost;
+      totals.input += e.input; totals.output += e.output; totals.cacheCreate += e.cacheCreate;
+      totals.cacheRead += e.cacheRead; totals.total += total; totals.cost += e.cost;
+      totals.inputCost += e.inputCost; totals.outputCost += e.outputCost;
+      totals.cacheCreateCost += e.cacheCreateCost; totals.cacheReadCost += e.cacheReadCost;
+    }
+    if (fileHadActivity) agentCount++;
   }
 
   const agents = Object.values(byName)
-    .map(g => ({ ...g, models: [...g.models] }))
+    .map(g => ({ ...g, models: [g.model] }))
     .sort((a, b) => b.cost - a.cost || b.total - a.total);
 
   const result = { agentCount, agents, totals: agentCount ? totals : null, daily };
