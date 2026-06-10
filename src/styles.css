@@ -724,6 +724,106 @@ html { height: 100%; overflow: hidden; }
 }
 .chat-json code { font-family: inherit; }
 
+/* Slash-command invocations and local stdout pulled from <command-*> tags. */
+.cmd-block {
+  margin: 4px 0;
+  padding: 6px 10px;
+  background: var(--ide-bg);
+  border: 1px solid var(--ide-bd);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.cmd-badge {
+  background: #9B59B6;
+  color: #fff;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-right: 8px;
+}
+.cmd-badge-out { background: #6B7280; }
+.cmd-badge-task { background: #22C55E; }
+.cmd-name {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--code-text);
+}
+.cmd-args {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+}
+.cmd-stdout {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--ide-code-bg);
+  border: 1px solid var(--ide-code-bd);
+  border-radius: 4px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Post-compact context card: files re-read / referenced after a /compact. */
+.chat-context {
+  background: var(--ide-bg);
+  border: 1px dashed var(--ide-bd);
+  align-self: stretch;
+  max-width: 100%;
+}
+.ctx-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.ctx-verb {
+  color: #9B59B6;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.ctx-path {
+  color: var(--code-text);
+  word-break: break-all;
+}
+.ctx-lines {
+  color: var(--text-secondary, #888);
+  flex-shrink: 0;
+}
+/* Unknown/unhandled context record — surfaced raw so new shapes are visible. */
+.ctx-raw {
+  margin: 2px 0;
+  font-size: 12px;
+}
+.ctx-raw > summary {
+  cursor: pointer;
+  list-style: revert;
+}
+.ctx-verb-raw {
+  color: #E67E22;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.ctx-raw > pre {
+  margin: 6px 0 0;
+}
+
+/* Compacted-summary user record (isCompactSummary): muted, collapsible. */
+.chat-compact {
+  background: var(--ide-bg);
+  border: 1px dashed var(--ide-bd);
+}
+.chat-compact .chat-msg-body {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 /* Agent-teams teammate messages. --tm-color is set inline per card. */
 .chat-teammates {
   background: transparent;

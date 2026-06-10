@@ -94,6 +94,57 @@ function renderTeammateBlocks(text, highlight) {
   return { teammateHtml: cards.join(''), remaining: remaining.trim() };
 }
 
+// Strip ANSI SGR escape codes (e.g. [2m … [22m) that wrap CLI stdout.
+function stripAnsi(s) {
+  return s.replace(/\[[0-9;]*m/g, '');
+}
+
+// Slash-command invocations and their local stdout are injected into the
+// transcript as <command-*> / <local-command-*> tags. Render them as compact
+// chips instead of leaking the raw markup into the chat body. The per-command
+// caveat is boilerplate the CLI prepends to every local command — drop it.
+function renderCommandBlocks(text, highlight) {
+  const blocks = [];
+  let remaining = text;
+
+  remaining = remaining.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, '');
+
+  remaining = remaining.replace(
+    /<command-name>([\s\S]*?)<\/command-name>(?:\s*<command-message>([\s\S]*?)<\/command-message>)?(?:\s*<command-args>([\s\S]*?)<\/command-args>)?/g,
+    (_, name, _msg, cmdArgs) => {
+      const args = (cmdArgs || '').trim();
+      blocks.push(`<div class="cmd-block"><span class="cmd-badge">Command</span><span class="cmd-name">${highlightText(escapeHtml(name.trim()), highlight)}</span>${args ? ` <span class="cmd-args">${highlightText(escapeHtml(args), highlight)}</span>` : ''}</div>`);
+      return '';
+    });
+
+  remaining = remaining.replace(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/g, (_, out) => {
+    const clean = stripAnsi(out).trim();
+    if (clean) blocks.push(`<div class="cmd-block"><span class="cmd-badge cmd-badge-out">Output</span><pre class="cmd-stdout">${highlightText(escapeHtml(clean), highlight)}</pre></div>`);
+    return '';
+  });
+
+  return { commandHtml: blocks.join(''), remaining: remaining.trim() };
+}
+
+function innerTag(body, name) {
+  const m = body.match(new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`));
+  return m ? m[1].trim() : '';
+}
+
+// Background-task / workflow completion notices arrive in string content as
+// <task-notification> wrappers. Render them as a status chip.
+function renderTaskNotifications(text, highlight) {
+  const blocks = [];
+  const remaining = text.replace(/<task-notification>([\s\S]*?)<\/task-notification>/g, (_, body) => {
+    const status = innerTag(body, 'status') || 'done';
+    const summary = innerTag(body, 'summary');
+    const taskId = innerTag(body, 'task-id');
+    blocks.push(`<div class="cmd-block"><span class="cmd-badge cmd-badge-task">Task ${escapeHtml(status)}</span>${summary ? `<span class="cmd-name">${highlightText(escapeHtml(summary), highlight)}</span>` : ''}${taskId ? ` <span class="cmd-args">#${escapeHtml(taskId)}</span>` : ''}</div>`);
+    return '';
+  });
+  return { taskHtml: blocks.join(''), remaining: remaining.trim() };
+}
+
 function renderIdeContext(text) {
   const ideBlocks = [];
   let remaining = text;
@@ -126,9 +177,13 @@ function renderChatParts(parts, highlight) {
   return parts.map(p => {
     if (p.type === 'text') {
       const { teammateHtml, remaining: afterTeammate } = renderTeammateBlocks(p.text, highlight);
-      const { ideHtml, remaining } = renderIdeContext(afterTeammate);
+      const { commandHtml, remaining: afterCmd } = renderCommandBlocks(afterTeammate, highlight);
+      const { taskHtml, remaining: afterTask } = renderTaskNotifications(afterCmd, highlight);
+      const { ideHtml, remaining } = renderIdeContext(afterTask);
       let html = '';
       if (teammateHtml) html += teammateHtml;
+      if (commandHtml) html += commandHtml;
+      if (taskHtml) html += taskHtml;
       if (ideHtml) html += ideHtml;
       if (remaining) html += `<div class="chat-msg-body">${renderJsonAware(remaining, highlight)}</div>`;
       return html;
@@ -168,6 +223,22 @@ function renderChatParts(parts, highlight) {
         agentInfo = `<div class="agent-usage-bar">Agent: ${formatNum(u.totalTokens)} tokens &middot; ${u.toolUses} tool calls${dur ? ` &middot; ${dur}` : ''}</div>`;
       }
       return `${agentInfo}<div class="${cls}">${renderJsonAware(text, highlight)}</div>`;
+    }
+    if (p.type === 'attachment') {
+      if (p.kind === 'unknown') {
+        let raw = '';
+        try { raw = JSON.stringify(p.raw, null, 2); } catch { raw = String(p.raw); }
+        if (raw.length > 4000) raw = raw.slice(0, 4000) + '\n… (truncated)';
+        return `<details class="ctx-raw"><summary><span class="ctx-verb ctx-verb-raw">attachment: ${escapeHtml(p.attachType)}</span></summary><pre class="cmd-stdout">${highlightText(escapeHtml(raw), highlight)}</pre></details>`;
+      }
+      if (p.kind === 'queued' || p.kind === 'date') {
+        const verb = p.kind === 'queued' ? 'Queued' : 'Date';
+        return `<div class="ctx-row"><span class="ctx-verb">${verb}</span><span class="ctx-path">${highlightText(escapeHtml(p.text), highlight)}</span></div>`;
+      }
+      const VERB = { file: 'Read', reference: 'Referenced file', edited: 'Edited', memory: 'Loaded memory' };
+      const verb = VERB[p.kind] || 'Context';
+      const lines = p.numLines != null ? `<span class="ctx-lines">(${formatNum(p.numLines)} lines)</span>` : '';
+      return `<div class="ctx-row"><span class="ctx-verb">${verb}</span><span class="ctx-path">${escapeHtml(p.displayPath)}</span>${lines}</div>`;
     }
     if (p.type === 'image') {
       const src = `data:${p.mediaType};base64,${p.data}`;
@@ -209,16 +280,24 @@ function renderChatMessages(messages, highlight) {
       && m.parts.some(p => p.type === 'text' && /<teammate-message\b/.test(p.text))
       && m.parts.every(p => p.type !== 'text'
         || !p.text.replace(/<teammate-message\b[^>]*>[\s\S]*?<\/teammate-message>/g, '').trim());
-    const roleClass = teammateOnly ? 'chat-teammates' : `chat-${m.role}`;
-    const roleLabel = teammateOnly ? 'Teammates'
+    const isCompact = !!m.isCompactSummary;
+    const isAttach = m.role === 'attachment';
+    const roleClass = isCompact ? 'chat-compact' : isAttach ? 'chat-context' : teammateOnly ? 'chat-teammates' : `chat-${m.role}`;
+    const roleLabel = isCompact ? 'Compacted Summary'
+      : isAttach ? 'Context'
+      : teammateOnly ? 'Teammates'
       : m.role === 'user' ? 'You' : m.role === 'tool' ? 'Tool Result' : 'Claude';
+    const partsHtml = renderChatParts(m.parts, highlight);
+    // A message whose content fully collapses to nothing (e.g. a dropped
+    // command caveat) would render as an empty bubble — skip it entirely.
+    if (!partsHtml.trim() && !metaHtml) return '';
     return `<div class="chat-msg ${roleClass}">
       <div class="chat-msg-header">
         <span class="chat-role">${roleLabel}</span>
         <span class="chat-time">${time}</span>
       </div>
       ${metaHtml}
-      ${renderChatParts(m.parts, highlight)}
+      ${partsHtml}
     </div>`;
   }).join('');
 }

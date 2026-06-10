@@ -326,10 +326,52 @@ function getSessionChat(folder, sessionId) {
   const { fullPath: projectPath } = resolveProjectName(folder);
 
   const messages = [];
+  // Post-compact context (re-read files / referenced files) arrives as a run of
+  // `attachment` records. Buffer consecutive ones into a single "Context" message
+  // so they render as one card in sequence, like the CLI's post-compact summary.
+  let pendingAttach = null;
+  const flushAttach = () => {
+    if (pendingAttach && pendingAttach.parts.length) messages.push(pendingAttach);
+    pendingAttach = null;
+  };
   for (const line of fs.readFileSync(fpath, 'utf8').trim().split('\n')) {
     if (!line) continue;
     try {
       const rec = JSON.parse(line);
+      if (rec.type === 'attachment' && rec.attachment) {
+        const a = rec.attachment;
+        let part = null;
+        if (a.type === 'file' && a.displayPath) {
+          let numLines = null;
+          try {
+            const c = typeof a.content === 'string' ? JSON.parse(a.content) : a.content;
+            numLines = c?.file?.numLines ?? null;
+          } catch {}
+          part = { type: 'attachment', kind: 'file', displayPath: a.displayPath, numLines };
+        } else if (a.type === 'compact_file_reference' && a.displayPath) {
+          part = { type: 'attachment', kind: 'reference', displayPath: a.displayPath };
+        } else if (a.type === 'edited_text_file' && a.filename) {
+          part = { type: 'attachment', kind: 'edited', displayPath: a.displayPath || a.filename };
+        } else if (a.type === 'nested_memory' && a.displayPath) {
+          part = { type: 'attachment', kind: 'memory', displayPath: a.displayPath };
+        } else if (a.type === 'queued_command') {
+          const txt = Array.isArray(a.prompt) ? a.prompt.map(b => b?.text || '').join(' ').trim() : '';
+          if (txt) part = { type: 'attachment', kind: 'queued', text: txt };
+        } else if (a.type === 'date_change' && a.newDate) {
+          part = { type: 'attachment', kind: 'date', text: a.newDate };
+        } else {
+          // Never silently drop a context record. Anything we don't yet render
+          // nicely is surfaced raw (collapsed JSON) so new/unknown shapes are
+          // visible and can be reported, then designed properly. See CLAUDE.md.
+          part = { type: 'attachment', kind: 'unknown', attachType: a.type || 'unknown', raw: a };
+        }
+        if (part) {
+          if (!pendingAttach) pendingAttach = { role: 'attachment', parts: [], timestamp: rec.timestamp || null };
+          pendingAttach.parts.push(part);
+        }
+        continue;
+      }
+      flushAttach();
       if ((rec.type === 'user' || rec.type === 'assistant') && rec.message?.content) {
         const content = rec.message.content;
         const parts = [];
@@ -392,6 +434,7 @@ function getSessionChat(folder, sessionId) {
           let role = rec.type;
           if (rec.type === 'user' && !parts.some(p => p.type === 'text' || p.type === 'image')) role = 'tool';
           const msg = { role, parts, timestamp: rec.timestamp || null };
+          if (rec.isCompactSummary) msg.isCompactSummary = true;
           if (rec.type === 'assistant') {
             const model = rec.message.model;
             if (model && model !== '<synthetic>') msg.model = model;
@@ -410,6 +453,7 @@ function getSessionChat(folder, sessionId) {
       }
     } catch {}
   }
+  flushAttach();
   return reorderToolResults(messages);
 }
 
