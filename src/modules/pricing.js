@@ -2,6 +2,9 @@
 // Source: https://platform.claude.com/docs/en/about-claude/pricing (verified 2026-05-20).
 // Cache multipliers: 5m write = 1.25x input, 1h write = 2x input, cache read/refresh = 0.10x input.
 export const MODEL_PRICING = {
+  'fable-5':     { input: 10,   output: 50 },
+  'mythos-5':    { input: 10,   output: 50 },
+  'opus-4.8':    { input: 5,    output: 25 },
   'opus-4.7':    { input: 5,    output: 25 },
   'opus-4.6':    { input: 5,    output: 25 },
   'opus-4.5':    { input: 5,    output: 25 },
@@ -16,7 +19,9 @@ export const MODEL_PRICING = {
 
 // Fallback when a family is recognized but the version is unknown — use newest pricing.
 const FAMILY_DEFAULT = {
-  opus:   MODEL_PRICING['opus-4.7'],
+  fable:  MODEL_PRICING['fable-5'],
+  mythos: MODEL_PRICING['mythos-5'],
+  opus:   MODEL_PRICING['opus-4.8'],
   sonnet: MODEL_PRICING['sonnet-4.6'],
   haiku:  MODEL_PRICING['haiku-4.5'],
 };
@@ -26,7 +31,7 @@ export function getModelPricing(modelName) {
   const m = modelName.toLowerCase();
 
   // Match "<family>-<major>-<minor>" e.g. claude-opus-4-7, claude-sonnet-4-5-20251001.
-  const match = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
+  const match = m.match(/(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
   if (match) {
     const family = match[1];
     const major = match[2];
@@ -36,6 +41,8 @@ export function getModelPricing(modelName) {
     if (FAMILY_DEFAULT[family]) return FAMILY_DEFAULT[family];
   }
 
+  if (m.includes('fable'))  return FAMILY_DEFAULT.fable;
+  if (m.includes('mythos')) return FAMILY_DEFAULT.mythos;
   if (m.includes('opus'))   return FAMILY_DEFAULT.opus;
   if (m.includes('haiku'))  return FAMILY_DEFAULT.haiku;
   return FAMILY_DEFAULT.sonnet;

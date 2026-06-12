@@ -15,8 +15,8 @@
     "files": [
       "main.js",
       "preload.js",
+      "price-history.json",
       "src/**/*",
-      "data/**/*",
       "assets/**/*"
     ],
     "win": {
@@ -32,9 +32,6 @@
     "mac": {
       "target": "dmg"
     }
-  },
-  "dependencies": {
-    "chart.js": "^4.4.0"
   },
   "devDependencies": {
     "electron": "^41.1.1",

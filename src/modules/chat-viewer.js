@@ -193,7 +193,7 @@ function renderChatParts(parts, highlight) {
         const name = p.agentType || 'subagent';
         let modelChip;
         if (p.agentModel) {
-          const family = (p.agentModel.match(/opus|sonnet|haiku/) || [''])[0];
+          const family = (p.agentModel.match(/fable|mythos|opus|sonnet|haiku/) || [''])[0];
           const srcLabel = p.agentModelSource === 'override' ? 'override' : 'agent default';
           modelChip = `<span class="model-badge model-${family}">${escapeHtml(shortModel(p.agentModel))}</span><span class="agent-model-src">${srcLabel}</span>`;
         } else {
@@ -229,7 +229,20 @@ function renderChatParts(parts, highlight) {
         let raw = '';
         try { raw = JSON.stringify(p.raw, null, 2); } catch { raw = String(p.raw); }
         if (raw.length > 4000) raw = raw.slice(0, 4000) + '\n… (truncated)';
-        return `<details class="ctx-raw"><summary><span class="ctx-verb ctx-verb-raw">attachment: ${escapeHtml(p.attachType)}</span></summary><pre class="cmd-stdout">${highlightText(escapeHtml(raw), highlight)}</pre></details>`;
+        const scope = p.isRecord ? 'record' : 'attachment';
+        return `<details class="ctx-raw"><summary><span class="ctx-verb ctx-verb-raw">${scope}: ${escapeHtml(p.attachType)}</span></summary><pre class="cmd-stdout">${highlightText(escapeHtml(raw), highlight)}</pre></details>`;
+      }
+      if (p.kind === 'event') {
+        let text = p.text || '';
+        if (text.length > 300) text = text.slice(0, 300) + '…';
+        const textHtml = text ? `<span class="ctx-path">${highlightText(escapeHtml(text), highlight)}</span>` : '';
+        if (p.raw) {
+          let raw = '';
+          try { raw = JSON.stringify(p.raw, null, 2); } catch { raw = String(p.raw); }
+          if (raw.length > 4000) raw = raw.slice(0, 4000) + '\n… (truncated)';
+          return `<details class="ctx-raw"><summary><span class="ctx-verb">${escapeHtml(p.label)}</span>${textHtml}</summary><pre class="cmd-stdout">${highlightText(escapeHtml(raw), highlight)}</pre></details>`;
+        }
+        return `<div class="ctx-row"><span class="ctx-verb">${escapeHtml(p.label)}</span>${textHtml}</div>`;
       }
       if (p.kind === 'queued' || p.kind === 'date') {
         const verb = p.kind === 'queued' ? 'Queued' : 'Date';
@@ -249,7 +262,7 @@ function renderChatParts(parts, highlight) {
 }
 
 function shortModel(m) {
-  const match = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
+  const match = m.match(/(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
   if (!match) return m;
   const minor = match[3] ? `.${match[3]}` : '';
   return `${match[1]}-${match[2]}${minor}`;

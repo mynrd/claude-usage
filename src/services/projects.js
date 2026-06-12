@@ -7,6 +7,12 @@ function getClaudeProjectsDir() {
   return path.join(os.homedir(), '.claude', 'projects');
 }
 
+// Bucket by the user's local calendar day — toISOString() is UTC and would
+// shift early-morning usage onto the previous day.
+function localDay(dt) {
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
 // Claude Code writes the JSONL during streaming, so one API response
 // (message.id + requestId) appears as several lines, each carrying a copy of
 // the usage object — raw sums overcount 2-20x (PLANNING.md F1/F2). Per key,
@@ -130,7 +136,7 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
               sCacheCreate += d.cacheCreate;
               sCacheRead += d.cacheRead;
               if (model && model !== '<synthetic>') sModels.add(model);
-              const day = dt ? dt.toISOString().split('T')[0] : null;
+              const day = dt ? localDay(dt) : null;
               sCost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
               sessionHasMatch = true;
               hasMatchingRecords = true;
@@ -224,7 +230,7 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
             output      += d.output;
             cacheCreate += d.cacheCreate;
             cacheRead   += d.cacheRead;
-            const day = dt ? dt.toISOString().split('T')[0] : null;
+            const day = dt ? localDay(dt) : null;
             const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             cost += recCost;
@@ -304,7 +310,7 @@ function getTodayLocalSummary(includeSub = false) {
   const dir = getClaudeProjectsDir();
   if (!fs.existsSync(dir)) return { input: 0, output: 0, total: 0, cost: 0 };
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDay(new Date());
   let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
 
   for (const folder of fs.readdirSync(dir)) {
@@ -320,7 +326,7 @@ function getTodayLocalSummary(includeSub = false) {
             const rec = JSON.parse(line);
             if (rec.type === 'assistant' && rec.message?.model && !sessionModel) sessionModel = rec.message.model;
             if (rec.type === 'assistant' && rec.message?.usage && rec.timestamp) {
-              if (new Date(rec.timestamp).toISOString().split('T')[0] === today) {
+              if (localDay(new Date(rec.timestamp)) === today) {
                 const d = dedupe(rec);
                 input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
                 cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, rec.message.model || sessionModel, today);
@@ -369,6 +375,68 @@ function resolveAgentDefaultModel(projectPath, agentType) {
   }
   _agentModelCache[key] = model;
   return model;
+}
+
+// F7 (PLANNING.md): top-level record types beyond user/assistant/attachment
+// carry session events — hook runs, API errors/retries, mode flips, queue
+// operations, file snapshots, … New types appear as Claude Code evolves.
+// Known shapes map to a compact `event` row; anything unrecognized surfaces
+// raw (kind 'unknown') so it is visible in the UI, never silently dropped.
+// Same contract as the attachment branch — see CLAUDE.md.
+function contextEventPart(rec) {
+  const ev = (label, text, raw) => ({ type: 'attachment', kind: 'event', label, text: text || '', raw: raw || null });
+  const rawPart = (label) => ({ type: 'attachment', kind: 'unknown', attachType: label, isRecord: true, raw: rec });
+  switch (rec.type) {
+    case 'system': {
+      const st = rec.subtype;
+      if (st === 'compact_boundary') {
+        const m = rec.compactMetadata;
+        const detail = m ? ` (${m.trigger}, ${(m.preTokens || 0).toLocaleString()} → ${(m.postTokens || 0).toLocaleString()} tokens)` : '';
+        return ev('Compacted', (rec.content || 'Conversation compacted') + detail);
+      }
+      if (st === 'api_error') {
+        const e = rec.error || {};
+        const retry = rec.retryAttempt ? ` — retry ${rec.retryAttempt}/${rec.maxRetries}` : '';
+        return ev('API error', (e.formatted || e.message || '') + retry, rec);
+      }
+      if (st === 'stop_hook_summary') {
+        const n = rec.hookCount || (rec.hookInfos || []).length;
+        const ms = (rec.hookInfos || []).reduce((a, h) => a + (h.durationMs || 0), 0);
+        const errs = (rec.hookErrors || []).length;
+        return ev('Stop hook', `${n} hook${n === 1 ? '' : 's'}, ${ms} ms${errs ? `, ${errs} error${errs === 1 ? '' : 's'}` : ''}`, rec);
+      }
+      if (st === 'turn_duration') return ev('Turn', `${((rec.durationMs || 0) / 1000).toFixed(1)}s · ${rec.messageCount || 0} messages`);
+      if (st === 'away_summary') return ev('Recap', rec.content || '');
+      if (st === 'informational') return ev('Info', rec.content || '');
+      if (st === 'scheduled_task_fire') return ev('Scheduled', rec.content || '');
+      // local_command content is the same <command-name>… markup user messages
+      // carry — reuse the Command chip renderer via a text part.
+      if (st === 'local_command' && rec.content) return { type: 'text', text: rec.content };
+      return rawPart('system: ' + (st || 'unknown'));
+    }
+    case 'progress': {
+      const d = rec.data || {};
+      if (d.type === 'hook_progress') return ev('Hook', d.hookName || d.hookEvent || '', rec);
+      if (d.type === 'agent_progress') return ev('Agent progress', '', rec);
+      return rawPart('progress: ' + (d.type || 'unknown'));
+    }
+    case 'queue-operation': {
+      if (rec.operation === 'enqueue') return ev('Queued', rec.content || '');
+      if (rec.operation === 'dequeue') return ev('Dequeued', rec.content || '');
+      if (rec.operation === 'remove')  return ev('Unqueued', rec.content || '');
+      return rawPart('queue-operation: ' + (rec.operation || 'unknown'));
+    }
+    case 'last-prompt': return ev('Last prompt', rec.lastPrompt || '');
+    case 'file-history-snapshot': {
+      const n = Object.keys(rec.snapshot?.trackedFileBackups || {}).length;
+      return ev('File snapshot', n ? `${n} file${n === 1 ? '' : 's'} tracked` : 'no tracked files');
+    }
+    case 'mode': return ev('Mode', rec.mode || '');
+    case 'permission-mode': return ev('Permissions', rec.permissionMode || '');
+    case 'teleported-from': return ev('Teleported', `from remote session${rec.messageCount ? ` (${rec.messageCount} messages)` : ''}`);
+    case 'ai-title': return ev('Title', rec.aiTitle || '');
+    default: return rawPart(rec.type || 'unknown');
+  }
 }
 
 function getSessionChat(folder, sessionId) {
@@ -421,6 +489,14 @@ function getSessionChat(folder, sessionId) {
           if (!pendingAttach) pendingAttach = { role: 'attachment', parts: [], timestamp: rec.timestamp || null };
           pendingAttach.parts.push(part);
         }
+        continue;
+      }
+      // F7: every other top-level record type renders as a context event row
+      // (or raw when unrecognized) — never silently dropped.
+      if (rec.type !== 'user' && rec.type !== 'assistant') {
+        const part = contextEventPart(rec);
+        if (!pendingAttach) pendingAttach = { role: 'attachment', parts: [], timestamp: rec.timestamp || null };
+        pendingAttach.parts.push(part);
         continue;
       }
       flushAttach();
@@ -603,7 +679,7 @@ function getSessionSubagents(folder, sessionId) {
             }
           }
           if (rec.message?.usage) {
-            const day = rec.timestamp ? new Date(rec.timestamp).toISOString().split('T')[0] : null;
+            const day = rec.timestamp ? localDay(new Date(rec.timestamp)) : null;
             const d = dedupe(rec);
             const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
@@ -800,7 +876,7 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
               const oT = d.output;
               const ccT = d.cacheCreate;
               const crT = d.cacheRead;
-              const day = dt ? dt.toISOString().split('T')[0] : null;
+              const day = dt ? localDay(dt) : null;
               const cost = calcCost(iT, oT, ccT, crT, model, day);
 
               pInput += iT; pOutput += oT; pCacheCreate += ccT; pCacheRead += crT; pCost += cost;

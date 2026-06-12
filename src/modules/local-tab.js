@@ -1,5 +1,5 @@
 import { estimateCost, formatCost } from './pricing.js';
-import { formatNum } from './utils.js';
+import { escapeHtml, formatNum } from './utils.js';
 import { openSessionChat } from './chat-viewer.js';
 import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
 
@@ -64,7 +64,7 @@ export async function loadLocalUsage() {
       : 'N/A';
 
     div.innerHTML = `
-      <div class="proj-name" title="${p.fullPath || p.name}">${p.name}</div>
+      <div class="proj-name" title="${escapeHtml(p.fullPath || p.name)}">${escapeHtml(p.name)}</div>
       <div class="proj-meta">${formatNum(p.totalTokens)} tokens &middot; <span class="cost-badge">${formatCost(p.totalCost || 0)}</span> &middot; ${p.sessionCount} sessions &middot; ${lastActiveStr}</div>
     `;
     div.addEventListener('click', () => {
@@ -90,8 +90,8 @@ async function loadProjectDetail(folder, name, fullPath) {
   const panel = document.getElementById('project-detail');
 
   panel.innerHTML = `
-    <h3 style="font-size:14px;margin-bottom:4px;">${name}</h3>
-    <div style="font-size:11px;color:#888;margin-bottom:12px;" title="${fullPath || name}">${fullPath || name}</div>
+    <h3 style="font-size:14px;margin-bottom:4px;">${escapeHtml(name)}</h3>
+    <div style="font-size:11px;color:#888;margin-bottom:12px;" title="${escapeHtml(fullPath || name)}">${escapeHtml(fullPath || name)}</div>
     <div class="detail-tabs">
       <button class="detail-tab active" data-dtab="sessions">Sessions</button>
       <button class="detail-tab" data-dtab="daily">Daily Totals</button>
@@ -117,19 +117,19 @@ async function loadProjectDetail(folder, name, fullPath) {
 }
 
 function shortModel(m) {
-  const match = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
+  const match = m.match(/(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
   if (!match) return m;
   const minor = match[3] ? `.${match[3]}` : '';
   return `${match[1]}-${match[2]}${minor}`;
 }
 
+const CHAT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+const DETAIL_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
+
 function renderSessionRows(sessions) {
   sessions.forEach(s => { sessionMap[s.sessionId] = s; });
   return sessions.map(s => {
-    const started = s.startedAt
-      ? new Date(s.startedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-      : 'N/A';
-    const displayName = s.title || s.sessionId.substring(0, 8) + '...';
+    const displayName = escapeHtml(s.title || '') || s.sessionId.substring(0, 8) + '...';
     // Auto-titles repeat across sessions, so always show a short id to disambiguate.
     const idSuffix = `<span class="session-id-suffix">#${s.sessionId.substring(0, 8)}</span>`;
     const subagentBadge = s.subagentCount > 0
@@ -142,24 +142,21 @@ function renderSessionRows(sessions) {
     return `<tr class="session-row" data-sid="${s.sessionId}">
       <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName} ${idSuffix} ${subagentBadge}</td>
       <td>${modelHtml}</td>
-      <td>${started}</td>
-      <td class="tok-input">${formatNum(s.input)}</td>
-      <td class="tok-output">${formatNum(s.output)}</td>
-      <td class="tok-cache">${formatNum(s.cacheCreate)}</td>
-      <td class="tok-cache">${formatNum(s.cacheRead)}</td>
-      <td class="tok-total">${formatNum(total)}</td>
-      <td><button class="btn-detail" data-sid="${s.sessionId}">Detail</button></td>
+      <td class="tok-total">${formatNum(total)} <span class="tok-cost">(${formatCost(s.cost || 0)})</span></td>
+      <td class="session-actions">
+        <button class="btn-row-icon btn-chat" data-sid="${s.sessionId}" title="View conversation">${CHAT_ICON}</button>
+        <button class="btn-row-icon btn-detail" data-sid="${s.sessionId}" title="Usage detail">${DETAIL_ICON}</button>
+      </td>
     </tr>`;
   }).join('');
 }
 
 function bindSessionClicks(sessEl, folder) {
-  sessEl.querySelectorAll('.session-row').forEach(row => {
-    row.addEventListener('click', () => openSessionChat(folder, row.dataset.sid));
+  sessEl.querySelectorAll('.btn-chat').forEach(btn => {
+    btn.addEventListener('click', () => openSessionChat(folder, btn.dataset.sid));
   });
   sessEl.querySelectorAll('.btn-detail').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
+    btn.addEventListener('click', () => {
       const s = sessionMap[btn.dataset.sid];
       if (s) showModelDetailModal(s, folder);
     });
@@ -180,8 +177,7 @@ function renderSessionsTab(detail, folder) {
     </div>
     <table class="session-table">
       <thead><tr>
-        <th>Session</th><th>Model</th><th>Started</th>
-        <th>Input</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Total Tokens</th><th></th>
+        <th>Session</th><th>Models</th><th>Total Tokens</th><th></th>
       </tr></thead>
       <tbody id="session-tbody">${renderSessionRows(detail.sessions)}</tbody>
     </table>
@@ -203,7 +199,7 @@ function renderSessionsTab(detail, folder) {
       const filtered = detail.sessions.filter(s => matchSet.has(s.sessionId));
       document.getElementById('session-tbody').innerHTML = filtered.length
         ? renderSessionRows(filtered)
-        : '<tr><td colspan="9" class="empty-state" style="padding:20px">No matches</td></tr>';
+        : '<tr><td colspan="4" class="empty-state" style="padding:20px">No matches</td></tr>';
       bindSessionClicks(sessEl, folder);
     }, 400);
   });
@@ -398,7 +394,8 @@ async function showModelDetailModal(session, folder) {
 
 export function initLocalTab() {
   initModelDetailModal();
-  const today = new Date().toISOString().split('T')[0];
+  // Local calendar date — toISOString() is UTC and lags behind until UTC midnight.
+  const today = new Date().toLocaleDateString('en-CA');
   document.getElementById('local-date-from').value = today;
   document.getElementById('local-date-to').value   = today;
   document.getElementById('local-date-from').addEventListener('change', loadLocalUsage);

@@ -5,7 +5,7 @@ A desktop application that tracks local token consumption from Claude Code sessi
 ## Tech Stack
 
 - **Electron** — Cross-platform desktop framework (Windows & macOS)
-- **Chart.js** — Usage charts and analytics
+- **Chart.js** — Usage charts and analytics (bundled locally in `src/vendor/`)
 - **Node.js** — JSONL parsing for local Claude Code session data
 
 ## Features
@@ -13,30 +13,55 @@ A desktop application that tracks local token consumption from Claude Code sessi
 ### Tab 1 — Local Usage
 - Parses Claude Code session data from `~/.claude/projects/`
 - Lists all projects with total token counts, estimated cost, session counts, and last active date
-- **Date range filters** — From/To date pickers to scope usage data
+- Project names resolved from the encoded folder names by probing the real filesystem path
+- **Date range filters** — From/To date pickers (default to today); Clear shows full history
+- **Include subagents** toggle — folds subagent / agent-team token spend into every total (cards, project list, sessions, daily totals, charts); preference persisted
 - **Session search** — search across session titles and content
 - Per-project detail views:
-  - **Sessions** — breakdown by session (model, input/output/cache tokens, estimated cost), clickable to open chat viewer
+  - **Sessions** — one row per session with its AI-generated title (plus a short id to disambiguate), per-model badges, total tokens + estimated cost, and a subagent-count badge when the session spawned agents
+  - **Usage detail modal** — per-session breakdown by model (Input / Cache Write / Cache Read / Output, each with its cost share), plus a **Subagents & team** table (one row per teammate × model, with spawns, tool calls, and cost) and a session + subagents grand total
   - **Daily Totals** — aggregated daily usage with estimated cost
   - **Chart** — stacked bar chart of daily token consumption
 
 ### Tab 2 — Analytics
-- Cross-project analytics with date range filtering
+- Cross-project analytics with date range filtering and the same **Include subagents** toggle
 - **Daily Token Usage** — stacked bar chart across all projects
 - **Daily Cost** — cost trend over time
 - **Token Type Breakdown** — doughnut chart of input/output/cache distribution
 - **Top Projects by Usage** — bar chart of heaviest consumers
 
+### Subagent & Agent Team Tracking
+- Subagent/team transcripts live in `<sessionId>/subagents/agent-*.jsonl` (Workflow runs nest one level deeper under `subagents/workflows/<wf-id>/`); the whole tree is parsed
+- Teammate identity resolved from the `agent-*.meta.json` sidecar (`agentType`), falling back to the `You are "name"` self-identification in the transcript
+- One row per **teammate × model** — a subagent that runs on multiple models is split so each row maps to a single rate card
+- Subagent default models resolved from agent definition frontmatter (project `.claude/agents/` first, then global `~/.claude/agents/`)
+- Results cached per session keyed by file sizes/mtimes, so the fold-in across all projects stays fast
+
+### Counting Accuracy
+- **Streamed-row dedupe** — Claude Code writes the JSONL during streaming, so one API response appears as several lines each carrying a copy of the usage object; raw sums overcount 2–20×. Every counting path dedupes by `message.id + requestId`, counting each usage category once at the highest value observed.
+- **Resumed/branched sessions** — dedup is folder-scoped and files are scanned oldest-first, so a resumed session's copied history isn't double-counted; the copy contributes only its new turns.
+- Shared agent-team turns and repeated tool_use blocks are likewise deduped across all of a session's agent files.
+- `scripts/verify-usage.py` is an independent Python reference implementation; `node scripts/verify-usage-app.js` checks the app's counting paths against its snapshotted targets and cross-path invariants (session rows ⇔ folder totals ⇔ daily totals).
+
 ### Chat History Viewer
 - Full chat viewer overlay for any session
-- Displays user/assistant messages with timestamps
-- **Tool use visualization** — shows Bash, Edit, Read, Write, Glob, Grep calls with inputs and results
+- Displays user/assistant messages with timestamps, model badges, and per-message token usage
+- **Tool use visualization** — shows tool calls with inputs and results; parallel tool results are re-ordered so each result sits next to its call
+- **Subagent calls** — Agent tool calls render with the agent type and its resolved model (explicit override, agent default, or "inherits parent model"), and results show the agent's token/tool-call/duration summary
+- **Context records** — every non-message transcript record is rendered: file reads/references/edits, memory loads, compaction boundaries, API errors/retries, hook runs, queue operations, mode/permission changes, scheduled-task fires, and more. Unknown shapes are never dropped — they render as collapsed raw JSON so new record types stay visible
+- **Compacted summaries** — `/compact` summaries render as a collapsible card
+- **Slash commands** — command invocations and their local stdout render as compact chips (ANSI codes stripped)
+- **Task notifications** — background-task / workflow completion notices render as status chips
+- **Agent teams** — `<teammate-message>` blocks render as color-coded teammate cards; status payloads (e.g. idle notifications) collapse to one-line summaries
 - **IDE context** — shows opened files and code selections
 - **Image viewing** — inline images with click-to-zoom lightbox
 - **Chat search** — highlight matches within a conversation
+- JSON-only content pretty-prints as a code block
 
 ### Widget Mode
 - Compact summary overlay showing today's local token usage and estimated cost across all projects
+- Honors the **Include subagents** preference
+- **Pin** button keeps the widget above other windows
 
 ### Dark Mode
 - Toggle between light and dark themes via the moon/sun button in the header
@@ -54,6 +79,7 @@ A desktop application that tracks local token consumption from Claude Code sessi
 - App minimizes to system tray on close instead of quitting
 - Right-click menu: Show, Widget Mode, Quit
 - Double-click tray icon to restore window
+- Single-instance lock — launching a second copy focuses the existing window
 
 ### Keyboard Shortcuts
 - **F11** — Toggle fullscreen
@@ -65,6 +91,17 @@ A desktop application that tracks local token consumption from Claude Code sessi
 npm install
 npm start
 ```
+
+## Verify Counting
+
+```bash
+node scripts/verify-usage-app.js
+```
+
+Runs the app's counting paths (under plain Node, with Electron shimmed) against
+point-in-time targets produced by `scripts/verify-usage.py`. The targets are
+snapshots of live transcript folders — if a check fails, re-run the Python
+reference first to distinguish a code bug from folder drift.
 
 ## Build Distributable
 
@@ -166,28 +203,33 @@ Editing the project-root copy and restarting the app will **not** overwrite an e
 
 ```
 Claude Usage/
-├── main.js              Electron main process (IPC, tray)
+├── main.js              Electron main process (single-instance lock, bootstrap)
 ├── preload.js           Secure context bridge
 ├── package.json
-├── assets/
-│   └── tray-icon.png    System tray icon
+├── assets/              App + tray icons
 ├── price-history.json   Historical model pricing snapshots (edit to update rates)
+├── scripts/
+│   ├── verify-usage.py      Independent reference counter (produces targets)
+│   └── verify-usage-app.js  Checks app counting paths against the targets
 ├── src/
-│   ├── index.html       UI layout (tabs, modals)
+│   ├── index.html       UI layout (tabs, widget, chat overlay, lightbox)
 │   ├── styles.css       Styling (light & dark themes)
 │   ├── renderer.js      Frontend entry point
+│   ├── vendor/
+│   │   └── chart.umd.min.js  Bundled Chart.js
 │   ├── modules/
-│   │   ├── local-tab.js     Local usage tab
+│   │   ├── local-tab.js     Local usage tab + usage detail modal
 │   │   ├── analytics-tab.js Analytics tab
 │   │   ├── chat-viewer.js   Chat history overlay
-│   │   ├── widget.js        Widget mode
+│   │   ├── widget.js        Widget mode (incl. pin)
+│   │   ├── settings.js      Persisted UI settings (include-subagents toggle)
 │   │   ├── pricing.js       Cost estimation (renderer fallback)
 │   │   ├── theme.js         Dark/light theme toggle
 │   │   └── utils.js         Shared utilities
 │   └── services/
 │       ├── config.js         App config (theme settings)
 │       ├── ipc.js            IPC handlers
-│       ├── projects.js       JSONL parsing for Claude Code sessions
+│       ├── projects.js       JSONL parsing, dedupe, subagent aggregation, chat extraction
 │       ├── pricing.js        Cost calculation (main process)
 │       ├── price-history.js  Historical pricing lookup
 │       ├── tray.js           System tray

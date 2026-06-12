@@ -529,7 +529,14 @@ html { height: 100%; overflow: hidden; }
   border-top: 1px solid var(--table-head);
 }
 .session-table tr:nth-child(even), .daily-table tr:nth-child(even) { background: var(--stripe); }
-.session-name { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Fixed layout: every column has an explicit width except Session (1st),
+   which absorbs the remaining space. Widths land on the th cells. */
+.session-table { table-layout: fixed; }
+.session-table th:nth-child(2) { width: 150px; } /* Models */
+.session-table th:nth-child(3) { width: 130px; } /* Total Tokens (cost) */
+.session-table th:nth-child(4) { width: 75px; }  /* actions */
+.session-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .detail-chart-container {
   height: 200px;
@@ -562,8 +569,8 @@ html { height: 100%; overflow: hidden; }
 .search-count { font-size: 11px; color: var(--subtext); white-space: nowrap; }
 .chat-highlight { background: #FBBF24; color: #000; border-radius: 2px; padding: 0 1px; }
 
-/* ── Session rows clickable ──────────────────────────────────────── */
-.session-row { cursor: pointer; transition: background 0.12s; }
+/* ── Session rows — actions live in the per-row icon buttons ─────── */
+.session-row { transition: background 0.12s; }
 .session-row:hover { background: var(--active-item-bg) !important; }
 
 /* ── Chat Viewer Overlay ─────────────────────────────────────────── */
@@ -811,6 +818,11 @@ html { height: 100%; overflow: hidden; }
 .ctx-raw > pre {
   margin: 6px 0 0;
 }
+/* Event rows with a raw payload render as a collapsible: label + text in the
+   summary line, spaced like a .ctx-row. */
+.ctx-raw > summary .ctx-path {
+  margin-left: 8px;
+}
 
 /* Compacted-summary user record (isCompactSummary): muted, collapsible. */
 .chat-compact {
@@ -1054,6 +1066,8 @@ body.widget-mode .widget-view {
   font-weight: 700;
   white-space: nowrap;
 }
+.model-fable  { background: #E0115F22; color: #E0115F; border: 1px solid #E0115F44; }
+.model-mythos { background: #14B8A622; color: #14B8A6; border: 1px solid #14B8A644; }
 .model-opus   { background: #7B61FF22; color: #7B61FF; border: 1px solid #7B61FF44; }
 .model-sonnet { background: #E8913022; color: #CC7820; border: 1px solid #E8913044; }
 .model-haiku  { background: #4A90D922; color: #4A90D9; border: 1px solid #4A90D944; }
@@ -1301,17 +1315,21 @@ body.widget-mode .widget-view {
   font-weight: 700;
 }
 .grand-total-figures { font-weight: 600; }
-.btn-detail {
-  font-size: 10px;
-  padding: 2px 7px;
+/* Fixed width sized to exactly two icon buttons, so the column doesn't
+   wobble between rows or collapse when a search re-render is narrow. */
+.session-actions { white-space: nowrap; width: 62px; min-width: 62px; text-align: center; }
+.btn-row-icon {
+  padding: 3px 5px;
   background: var(--card-bg);
   border: 1px solid var(--card-bd);
   border-radius: 4px;
   cursor: pointer;
   color: var(--subtext);
-  white-space: nowrap;
+  line-height: 0;
 }
-.btn-detail:hover {
+.btn-row-icon + .btn-row-icon { margin-left: 4px; }
+.btn-row-icon svg { width: 13px; height: 13px; }
+.btn-row-icon:hover {
   border-color: var(--blue);
   color: var(--blue);
 }

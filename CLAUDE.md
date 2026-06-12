@@ -45,7 +45,13 @@ When you handle a new shape, prefer matching the CLI's own wording (e.g. `Read <
 ## Known shapes (current coverage)
 
 Record types: `user`, `assistant` (with `message.usage`), `attachment`, plus `isCompactSummary`
-user records (rendered as a collapsible "Compacted Summary").
+user records (rendered as a collapsible "Compacted Summary"). All other top-level record
+types go through `contextEventPart()` in projects.js: known ones render as compact event
+rows in a "Context" card — `system` (per subtype: compact_boundary, api_error,
+stop_hook_summary, turn_duration, away_summary, informational, scheduled_task_fire,
+local_command), `progress` (hook_progress, agent_progress), `queue-operation`,
+`last-prompt`, `file-history-snapshot`, `mode`, `permission-mode`, `teleported-from`,
+`ai-title` — and any unrecognized type/subtype surfaces as a raw `record: <type>` block.
 
 `attachment.type` rendered nicely: `file`, `compact_file_reference`, `edited_text_file`,
 `nested_memory`, `queued_command`, `date_change`. Everything else → raw `unknown` block
