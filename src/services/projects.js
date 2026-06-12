@@ -7,6 +7,53 @@ function getClaudeProjectsDir() {
   return path.join(os.homedir(), '.claude', 'projects');
 }
 
+// Claude Code writes the JSONL during streaming, so one API response
+// (message.id + requestId) appears as several lines, each carrying a copy of
+// the usage object — raw sums overcount 2-20x (PLANNING.md F1/F2). Per key,
+// each usage category counts once at the highest value observed: identical
+// duplicate rows contribute 0; placeholder→final rows converge to the final
+// value. Returns the per-category delta to add, plus `first` (first sighting
+// of the key — used for turn counts). Records without message.id count as-is.
+function createUsageDeduper() {
+  const seen = new Map();
+  return (rec) => {
+    const u = rec.message.usage;
+    const cur = {
+      input: u.input_tokens || 0,
+      output: u.output_tokens || 0,
+      cacheCreate: u.cache_creation_input_tokens || 0,
+      cacheRead: u.cache_read_input_tokens || 0,
+    };
+    const id = rec.message.id;
+    if (!id) return { ...cur, first: true };
+    const key = id + ':' + (rec.requestId || '');
+    const prev = seen.get(key);
+    if (!prev) { seen.set(key, cur); return { ...cur, first: true }; }
+    const delta = { first: false };
+    for (const c of ['input', 'output', 'cacheCreate', 'cacheRead']) {
+      delta[c] = cur[c] > prev[c] ? cur[c] - prev[c] : 0;
+      if (cur[c] > prev[c]) prev[c] = cur[c];
+    }
+    return delta;
+  };
+}
+
+// Folder scans share one deduper across session files (resumed/branched
+// sessions copy history into new files in the same folder). Scan oldest-first
+// so the original session keeps its tokens and a resumed copy dedups to only
+// its new turns (PLANNING.md D3).
+function listSessionFilesOldestFirst(dir) {
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => {
+      let mtime = 0;
+      try { mtime = Math.round(fs.statSync(path.join(dir, f)).mtimeMs); } catch {}
+      return { f, mtime };
+    })
+    .sort((a, b) => a.mtime - b.mtime || (a.f < b.f ? -1 : a.f > b.f ? 1 : 0))
+    .map(x => x.f);
+}
+
 function resolveProjectName(folder) {
   const wtIdx = folder.indexOf('--claude-worktrees-');
   const encoded = wtIdx >= 0 ? folder.substring(0, wtIdx) : folder;
@@ -54,10 +101,11 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
     const fullPath = path.join(dir, folder);
     if (!fs.statSync(fullPath).isDirectory()) continue;
 
-    const jsonlFiles = fs.readdirSync(fullPath).filter(f => f.endsWith('.jsonl'));
+    const jsonlFiles = listSessionFilesOldestFirst(fullPath);
     if (jsonlFiles.length === 0) continue;
 
     const { displayName, fullPath: projectPath } = resolveProjectName(folder);
+    const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
     let totalInput = 0, totalOutput = 0, totalCacheCreate = 0, totalCacheRead = 0;
     let totalCost = 0, lastActive = null, sessionCount = 0, hasMatchingRecords = false;
 
@@ -75,15 +123,15 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
               if ((dtStart || dtEnd) && !dt) continue;
               if (dt && dtStart && dt < dtStart) continue;
               if (dt && dtEnd   && dt > dtEnd)   continue;
-              const u = rec.message.usage;
               const model = rec.message.model || null;
-              sInput += u.input_tokens || 0;
-              sOutput += u.output_tokens || 0;
-              sCacheCreate += u.cache_creation_input_tokens || 0;
-              sCacheRead += u.cache_read_input_tokens || 0;
+              const d = dedupe(rec);
+              sInput += d.input;
+              sOutput += d.output;
+              sCacheCreate += d.cacheCreate;
+              sCacheRead += d.cacheRead;
               if (model && model !== '<synthetic>') sModels.add(model);
               const day = dt ? dt.toISOString().split('T')[0] : null;
-              sCost += calcCost(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, model, day);
+              sCost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
               sessionHasMatch = true;
               hasMatchingRecords = true;
               if (dt && (!lastActive || dt > lastActive)) lastActive = dt;
@@ -140,8 +188,10 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
 
   const sessions = [];
   const dailyMap = {};
+  const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
+  const seenAgentSpawns = new Set();   // streamed lines repeat tool_use blocks (D4)
 
-  for (const jf of fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'))) {
+  for (const jf of listSessionFilesOldestFirst(dir)) {
     const sessionId = jf.replace('.jsonl', '');
     let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
     let firstTs = null, lastTs = null, title = null;
@@ -157,7 +207,10 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
           if (rec.type === 'ai-title' && rec.aiTitle) title = rec.aiTitle;
           if (rec.type === 'assistant' && Array.isArray(rec.message?.content)) {
             for (const b of rec.message.content) {
-              if (b.type === 'tool_use' && b.name === 'Agent') subagentCount++;
+              if (b.type === 'tool_use' && b.name === 'Agent' && (!b.id || !seenAgentSpawns.has(b.id))) {
+                if (b.id) seenAgentSpawns.add(b.id);
+                subagentCount++;
+              }
             }
           }
           if (rec.type === 'assistant' && rec.message?.usage) {
@@ -165,24 +218,24 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
             if ((dtStart || dtEnd) && !dt) continue;
             if (dt && dtStart && dt < dtStart) continue;
             if (dt && dtEnd   && dt > dtEnd)   continue;
-            const u = rec.message.usage;
             const recModel = rec.message.model || null;
-            input       += u.input_tokens || 0;
-            output      += u.output_tokens || 0;
-            cacheCreate += u.cache_creation_input_tokens || 0;
-            cacheRead   += u.cache_read_input_tokens || 0;
+            const d = dedupe(rec);
+            input       += d.input;
+            output      += d.output;
+            cacheCreate += d.cacheCreate;
+            cacheRead   += d.cacheRead;
             const day = dt ? dt.toISOString().split('T')[0] : null;
-            const bd  = calcCostBreakdown(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, recModel, day);
+            const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             cost += recCost;
             if (recModel && recModel !== '<synthetic>') {
               models.add(recModel);
               if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0 };
               const mu = modelUsage[recModel];
-              mu.input           += u.input_tokens || 0;
-              mu.output          += u.output_tokens || 0;
-              mu.cacheCreate     += u.cache_creation_input_tokens || 0;
-              mu.cacheRead       += u.cache_read_input_tokens || 0;
+              mu.input           += d.input;
+              mu.output          += d.output;
+              mu.cacheCreate     += d.cacheCreate;
+              mu.cacheRead       += d.cacheRead;
               mu.inputCost       += bd.input;
               mu.outputCost      += bd.output;
               mu.cacheCreateCost += bd.cacheCreate;
@@ -193,10 +246,10 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
               if (!firstTs || dt < firstTs) firstTs = dt;
               if (!lastTs  || dt > lastTs)  lastTs  = dt;
               if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
-              dailyMap[day].input       += u.input_tokens || 0;
-              dailyMap[day].output      += u.output_tokens || 0;
-              dailyMap[day].cacheCreate += u.cache_creation_input_tokens || 0;
-              dailyMap[day].cacheRead   += u.cache_read_input_tokens || 0;
+              dailyMap[day].input       += d.input;
+              dailyMap[day].output      += d.output;
+              dailyMap[day].cacheCreate += d.cacheCreate;
+              dailyMap[day].cacheRead   += d.cacheRead;
               dailyMap[day].cost        += recCost;
             }
           }
@@ -257,7 +310,8 @@ function getTodayLocalSummary(includeSub = false) {
   for (const folder of fs.readdirSync(dir)) {
     const fullPath = path.join(dir, folder);
     if (!fs.statSync(fullPath).isDirectory()) continue;
-    for (const jf of fs.readdirSync(fullPath).filter(f => f.endsWith('.jsonl'))) {
+    const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
+    for (const jf of listSessionFilesOldestFirst(fullPath)) {
       let sessionModel = null;
       try {
         for (const line of fs.readFileSync(path.join(fullPath, jf), 'utf8').trim().split('\n')) {
@@ -267,11 +321,9 @@ function getTodayLocalSummary(includeSub = false) {
             if (rec.type === 'assistant' && rec.message?.model && !sessionModel) sessionModel = rec.message.model;
             if (rec.type === 'assistant' && rec.message?.usage && rec.timestamp) {
               if (new Date(rec.timestamp).toISOString().split('T')[0] === today) {
-                const u = rec.message.usage;
-                const iT = u.input_tokens || 0, oT = u.output_tokens || 0;
-                const ccT = u.cache_creation_input_tokens || 0, crT = u.cache_read_input_tokens || 0;
-                input += iT; output += oT; cacheCreate += ccT; cacheRead += crT;
-                cost += calcCost(iT, oT, ccT, crT, rec.message.model || sessionModel, today);
+                const d = dedupe(rec);
+                input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
+                cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, rec.message.model || sessionModel, today);
               }
             }
           } catch {}
@@ -468,12 +520,34 @@ function getSessionChat(folder, sessionId) {
 // affordable.
 const _subagentCache = new Map();
 
+// Plain Task/team subagents sit flat in <subagents>/agent-*.jsonl, but Workflow
+// researchers nest one level deeper: <subagents>/workflows/<wf-id>/agent-*.jsonl.
+// Walk the whole tree so a fan-out's transcripts are counted too — otherwise the
+// detail modal shows only the main thread and silently drops the (often far larger)
+// workflow cost.
+function listAgentTranscripts(subdir) {
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.name.endsWith('.jsonl')) out.push(full);
+    }
+  };
+  walk(subdir);
+  // Deterministic scan order: a turn shared by several teammate files is
+  // attributed to the first (sorted) file that contains it (PLANNING.md D3).
+  return out.sort();
+}
+
 function subagentDirSignature(subdir) {
   try {
-    const files = fs.readdirSync(subdir).filter(f => f.endsWith('.jsonl')).sort();
+    const files = listAgentTranscripts(subdir).sort();
     return files.map(f => {
-      const st = fs.statSync(path.join(subdir, f));
-      return `${f}:${st.size}:${Math.round(st.mtimeMs)}`;
+      const st = fs.statSync(f);
+      return `${path.relative(subdir, f)}:${st.size}:${Math.round(st.mtimeMs)}`;
     }).join('|');
   } catch { return ''; }
 }
@@ -494,7 +568,14 @@ function getSessionSubagents(folder, sessionId) {
 
   const newAcc = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
 
-  for (const jf of fs.readdirSync(subdir).filter(f => f.endsWith('.jsonl'))) {
+  // Agent-team teammates each persist a copy of shared conversation turns, so
+  // dedup must span ALL agent files of the session together (PLANNING.md F2/D2).
+  // Tool calls in a shared turn would likewise count once per teammate file —
+  // dedup them by tool_use block id across the session (D4).
+  const dedupe = createUsageDeduper();
+  const seenToolUseIds = new Set();
+
+  for (const jfPath of listAgentTranscripts(subdir)) {
     let firstUser = null;
     // Accumulate per model within the transcript — a subagent can run on more than
     // one model (e.g. an opus thread that delegates a step to haiku), and those have
@@ -503,7 +584,7 @@ function getSessionSubagents(folder, sessionId) {
     const ensure = (m) => perModel[m] || (perModel[m] = newAcc());
 
     try {
-      for (const line of fs.readFileSync(path.join(subdir, jf), 'utf8').trim().split('\n')) {
+      for (const line of fs.readFileSync(jfPath, 'utf8').trim().split('\n')) {
         if (!line) continue;
         try {
           const rec = JSON.parse(line);
@@ -514,25 +595,28 @@ function getSessionSubagents(folder, sessionId) {
           const model = rec.message?.model || null;
           const mk = (model && model !== '<synthetic>') ? model : 'unknown';
           if (Array.isArray(rec.message?.content)) {
-            for (const b of rec.message.content) if (b.type === 'tool_use') ensure(mk).toolUses++;
+            for (const b of rec.message.content) {
+              if (b.type !== 'tool_use') continue;
+              if (b.id && seenToolUseIds.has(b.id)) { ensure(mk); continue; }
+              if (b.id) seenToolUseIds.add(b.id);
+              ensure(mk).toolUses++;
+            }
           }
           if (rec.message?.usage) {
-            const u = rec.message.usage;
             const day = rec.timestamp ? new Date(rec.timestamp).toISOString().split('T')[0] : null;
-            const bd = calcCostBreakdown(u.input_tokens || 0, u.output_tokens || 0, u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0, model, day);
+            const d = dedupe(rec);
+            const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
-            const iT = u.input_tokens || 0, oT = u.output_tokens || 0;
-            const ccT = u.cache_creation_input_tokens || 0, crT = u.cache_read_input_tokens || 0;
             const e = ensure(mk);
-            e.input += iT; e.output += oT; e.cacheCreate += ccT; e.cacheRead += crT;
+            e.input += d.input; e.output += d.output; e.cacheCreate += d.cacheCreate; e.cacheRead += d.cacheRead;
             e.cost += recCost;
             e.inputCost += bd.input; e.outputCost += bd.output;
             e.cacheCreateCost += bd.cacheCreate; e.cacheReadCost += bd.cacheRead;
-            e.turns++;
+            if (d.first) e.turns++;
             if (day) {
               if (!daily[day]) daily[day] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
-              daily[day].input += iT; daily[day].output += oT;
-              daily[day].cacheCreate += ccT; daily[day].cacheRead += crT;
+              daily[day].input += d.input; daily[day].output += d.output;
+              daily[day].cacheCreate += d.cacheCreate; daily[day].cacheRead += d.cacheRead;
               daily[day].cost += recCost;
             }
           }
@@ -548,7 +632,7 @@ function getSessionSubagents(folder, sessionId) {
     //  3. otherwise a neutral fallback.
     let name = null;
     try {
-      const meta = JSON.parse(fs.readFileSync(path.join(subdir, jf.replace(/\.jsonl$/, '.meta.json')), 'utf8'));
+      const meta = JSON.parse(fs.readFileSync(jfPath.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
       if (meta && meta.agentType) name = meta.agentType;
     } catch { /* no sidecar */ }
     if (!name) {
@@ -558,8 +642,11 @@ function getSessionSubagents(folder, sessionId) {
 
     let fileHadActivity = false;
     for (const [mk, e] of Object.entries(perModel)) {
+      // A perModel entry only exists if the file had real assistant records for
+      // that model. Keep the row even when dedup left it at zero tokens (a
+      // teammate whose turns are all shared, attributed to an earlier file) —
+      // dropping it would make the transcript silently missing.
       const total = e.input + e.output + e.cacheCreate + e.cacheRead;
-      if (total === 0 && e.toolUses === 0) continue;
       fileHadActivity = true;
 
       // One row per (teammate, model) so each row maps to a single rate card.
@@ -689,10 +776,11 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
     const fullPath = path.join(dir, folder);
     if (!fs.statSync(fullPath).isDirectory()) continue;
 
-    const jsonlFiles = fs.readdirSync(fullPath).filter(f => f.endsWith('.jsonl'));
+    const jsonlFiles = listSessionFilesOldestFirst(fullPath);
     if (jsonlFiles.length === 0) continue;
 
     const { displayName } = resolveProjectName(folder);
+    const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
     let pInput = 0, pOutput = 0, pCacheCreate = 0, pCacheRead = 0, pCost = 0;
 
     for (const jf of jsonlFiles) {
@@ -706,12 +794,12 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
               if ((dtStart || dtEnd) && !dt) continue;
               if (dt && dtStart && dt < dtStart) continue;
               if (dt && dtEnd   && dt > dtEnd)   continue;
-              const u = rec.message.usage;
               const model = rec.message.model || null;
-              const iT = u.input_tokens || 0;
-              const oT = u.output_tokens || 0;
-              const ccT = u.cache_creation_input_tokens || 0;
-              const crT = u.cache_read_input_tokens || 0;
+              const d = dedupe(rec);
+              const iT = d.input;
+              const oT = d.output;
+              const ccT = d.cacheCreate;
+              const crT = d.cacheRead;
               const day = dt ? dt.toISOString().split('T')[0] : null;
               const cost = calcCost(iT, oT, ccT, crT, model, day);
 
