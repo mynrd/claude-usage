@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (cfg) => ipcRenderer.invoke('save-config', cfg),
-  listProjects: (startDate, endDate, includeSub) => ipcRenderer.invoke('list-projects', { startDate, endDate, includeSub }),
+  listProjects: (startDate, endDate, includeSub, seq) => ipcRenderer.invoke('list-projects', { startDate, endDate, includeSub, seq }),
   getProjectDetail: (folder, startDate, endDate, includeSub) => ipcRenderer.invoke('get-project-detail', { folder, startDate, endDate, includeSub }),
   searchSessions: (folder, query) => ipcRenderer.invoke('search-sessions', { folder, query }),
   getSessionChat: (folder, sessionId) => ipcRenderer.invoke('get-session-chat', { folder, sessionId }),
@@ -18,7 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   exportFile: (defaultName, content) => ipcRenderer.invoke('export-file', { defaultName, content }),
   onOpenWidget: (cb) => ipcRenderer.on('open-widget', cb),
   onUsageChanged: (cb) => ipcRenderer.on('usage-changed', cb),
+  onUsageProgress: (cb) => ipcRenderer.on('usage-progress', (_, payload) => cb(payload)),
   enterWidgetMode: () => ipcRenderer.invoke('enter-widget-mode'),
   exitWidgetMode: () => ipcRenderer.invoke('exit-widget-mode'),
   setWidgetPinned: (pinned) => ipcRenderer.invoke('set-widget-pinned', pinned),
+  perfMark: (label, ms, info) => ipcRenderer.send('perf-mark', { label, ms, info }),
 });

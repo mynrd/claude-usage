@@ -1,6 +1,6 @@
 const { Menu, Tray, nativeImage, app } = require('electron');
 const path = require('path');
-const { getTodayLocalSummary } = require('./projects');
+const worker = require('./worker-client');
 
 let tray = null;
 
@@ -11,13 +11,13 @@ function fmtTokens(n) {
   return String(n);
 }
 
-function updateTrayTooltip() {
+async function updateTrayTooltip() {
   if (!tray) return;
   try {
-    const t = getTodayLocalSummary(false);
-    tray.setToolTip(`Claude Usage — Today: ${fmtTokens(t.total)} tokens · $${t.cost.toFixed(2)}`);
+    const t = await worker.call('todaySummary', { includeSub: false });
+    if (tray) tray.setToolTip(`Claude Usage — Today: ${fmtTokens(t.total)} tokens · $${t.cost.toFixed(2)}`);
   } catch {
-    tray.setToolTip('Claude Usage');
+    if (tray) tray.setToolTip('Claude Usage');
   }
 }
 

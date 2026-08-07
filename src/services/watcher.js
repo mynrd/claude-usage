@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { getClaudeProjectsDir } = require('./projects');
+const { getClaudeProjectsDir } = require('./paths');
 
 // Watch ~/.claude/projects for transcript writes so the UI refreshes itself
 // while Claude Code is running. Events arrive in bursts during streaming —

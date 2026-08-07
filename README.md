@@ -247,6 +247,7 @@ Claude Usage/
 ├── price-history.json   Historical model pricing snapshots (edit to update rates)
 ├── scripts/
 │   └── verify-usage.py      Independent reference counter (raw vs deduped)
+├── perf.log             Startup/query timings written at runtime (gitignored)
 ├── src/
 │   ├── index.html       UI layout (tabs, widget, chat overlay, lightbox)
 │   ├── styles.css       Styling (light & dark themes)
@@ -265,10 +266,18 @@ Claude Usage/
 │   │   └── utils.js         Shared utilities
 │   └── services/
 │       ├── config.js         App config (theme settings)
-│       ├── ipc.js            IPC handlers
+│       ├── ipc.js            IPC handlers (thin — forward to the parser worker)
+│       ├── usage-worker.js   utilityProcess that does all transcript parsing
+│       ├── worker-client.js  Main-side request/response bridge to that worker
 │       ├── projects.js       JSONL parsing, dedupe, subagent aggregation, chat extraction
+│       ├── scan-index.js     Single shared readdir+stat sweep of ~/.claude/projects
+│       ├── parse-cache.js    Parse cache persisted across restarts
+│       ├── perf.js           Startup/query timing written to perf.log
+│       ├── paths.js          ~/.claude/projects location
 │       ├── pricing.js        Cost calculation (main process)
 │       ├── price-history.js  Historical pricing lookup
+│       ├── stats-cache.js    Reads Claude Code's own stats-cache.json
+│       ├── usage-cli.js      Runs `claude -p /usage` and parses it
 │       ├── watcher.js        ~/.claude/projects file watcher (live refresh)
 │       ├── tray.js           System tray + tooltip
 │       └── window.js         BrowserWindow management

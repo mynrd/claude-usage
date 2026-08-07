@@ -1,43 +1,65 @@
 const { ipcMain, dialog } = require('electron');
 const fs = require('fs');
+const perf = require('./perf');
 const { loadConfig, saveConfig } = require('./config');
-const { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches } = require('./projects');
 const { getLatestSnapshot, saveSnapshot } = require('./price-history');
 const { fetchCliUsage } = require('./usage-cli');
-const { getStatsCache } = require('./stats-cache');
+const worker = require('./worker-client');
 
 function setupIpc(getMainWindow) {
-  ipcMain.handle('get-config',  ()         => loadConfig());
-  ipcMain.handle('save-config', (_, cfg)   => { saveConfig(cfg); return true; });
+  // Every handler is timed. Transcript work is delegated to the parser worker,
+  // so these durations are message round-trips, not main-thread stalls.
+  const handle = (channel, fn) => {
+    ipcMain.handle(channel, (evt, arg) => perf.timeAsync(`ipc ${channel}`, () => fn(evt, arg)));
+  };
 
-  ipcMain.handle('list-projects',          (_, opts) => listLocalProjects(opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
-  ipcMain.handle('get-project-detail',     (_, opts) => getProjectDetail(opts?.folder, opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
-  ipcMain.handle('search-sessions',        (_, opts) => searchSessions(opts?.folder, opts?.query));
-  ipcMain.handle('get-session-chat',       (_, opts) => getSessionChat(opts?.folder, opts?.sessionId));
-  ipcMain.handle('get-session-subagents',  (_, opts) => getSessionSubagents(opts?.folder, opts?.sessionId));
-  ipcMain.handle('get-today-summary',      (_, opts) => getTodayLocalSummary(!!opts?.includeSub));
-  ipcMain.handle('get-analytics-data',     (_, opts) => getAggregatedDailyTotals(opts?.startDate || null, opts?.endDate || null, !!opts?.includeSub));
-  ipcMain.handle('get-rate-windows',       (_, opts) => getRateWindows(opts?.includeSub !== false));
-  ipcMain.handle('get-cli-usage',          () => fetchCliUsage());
-  ipcMain.handle('get-stats-cache',        () => getStatsCache());
+  // Renderer-side marks land in the same log/timeline as the main process.
+  ipcMain.on('perf-mark', (_, { label, ms, info }) => {
+    perf.mark(`renderer ${label}`, ms != null ? { atMs: Math.round(ms), ...(info || {}) } : info);
+  });
 
-  ipcMain.handle('get-price-snapshot', () => getLatestSnapshot());
-  ipcMain.handle('save-price-snapshot', (_, { prices }) => {
+  handle('get-config',  ()         => loadConfig());
+  handle('save-config', (_, cfg)   => { saveConfig(cfg); return true; });
+
+  // Folder results stream back as they finish so the project list fills in
+  // during a cold scan instead of appearing all at once at the end.
+  handle('list-projects', (_, opts) => worker.call('listProjects', {
+    startDate: opts?.startDate || null,
+    endDate: opts?.endDate || null,
+    includeSub: !!opts?.includeSub,
+  }, (payload) => {
+    const win = getMainWindow();
+    // seq lets the renderer drop progress belonging to a superseded scan.
+    if (win && !win.isDestroyed()) win.webContents.send('usage-progress', { ...payload, seq: opts?.seq });
+  }));
+
+  handle('get-project-detail',     (_, opts) => worker.call('projectDetail', { folder: opts?.folder, startDate: opts?.startDate || null, endDate: opts?.endDate || null, includeSub: !!opts?.includeSub }));
+  handle('search-sessions',        (_, opts) => worker.call('searchSessions', { folder: opts?.folder, query: opts?.query }));
+  handle('get-session-chat',       (_, opts) => worker.call('sessionChat', { folder: opts?.folder, sessionId: opts?.sessionId }));
+  handle('get-session-subagents',  (_, opts) => worker.call('sessionSubagents', { folder: opts?.folder, sessionId: opts?.sessionId }));
+  handle('get-today-summary',      (_, opts) => worker.call('todaySummary', { includeSub: !!opts?.includeSub }));
+  handle('get-analytics-data',     (_, opts) => worker.call('analytics', { startDate: opts?.startDate || null, endDate: opts?.endDate || null, includeSub: !!opts?.includeSub }));
+  handle('get-rate-windows',       (_, opts) => worker.call('rateWindows', { includeSub: opts?.includeSub !== false }));
+  handle('get-cli-usage',          () => fetchCliUsage());
+  handle('get-stats-cache',        () => worker.call('statsCache', {}));
+
+  handle('get-price-snapshot', () => getLatestSnapshot());
+  handle('save-price-snapshot', async (_, { prices }) => {
     const d = new Date();
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     saveSnapshot(prices, today);
-    clearCostCaches(); // subagent aggregates bake in costs — recompute at new rates
+    await worker.call('clearCostCaches', {}); // aggregates bake in costs — recompute at new rates
     return today;
   });
 
-  ipcMain.handle('export-file', async (_, { defaultName, content }) => {
+  handle('export-file', async (_, { defaultName, content }) => {
     const { canceled, filePath } = await dialog.showSaveDialog(getMainWindow(), { defaultPath: defaultName });
     if (canceled || !filePath) return null;
     fs.writeFileSync(filePath, content, 'utf8');
     return filePath;
   });
 
-  ipcMain.handle('enter-widget-mode', () => {
+  handle('enter-widget-mode', () => {
     const win = getMainWindow();
     win.setMinimumSize(380, 300);
     win.setSize(380, 360);
@@ -46,7 +68,7 @@ function setupIpc(getMainWindow) {
     return true;
   });
 
-  ipcMain.handle('exit-widget-mode', () => {
+  handle('exit-widget-mode', () => {
     const win = getMainWindow();
     win.setResizable(true);
     win.setAlwaysOnTop(false);
@@ -56,7 +78,7 @@ function setupIpc(getMainWindow) {
     return true;
   });
 
-  ipcMain.handle('set-widget-pinned', (_, pinned) => {
+  handle('set-widget-pinned', (_, pinned) => {
     const win = getMainWindow();
     win.setAlwaysOnTop(!!pinned);
     return !!pinned;

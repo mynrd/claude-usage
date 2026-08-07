@@ -5,6 +5,9 @@ import { initChatViewer }                  from './modules/chat-viewer.js';
 import { initWidget, refreshWidget }       from './modules/widget.js';
 import { initTheme }                       from './modules/theme.js';
 import { initPricingSettings }             from './modules/pricing-settings.js';
+import { mark, timeAsync }                 from './modules/perf.js';
+
+mark('renderer.js evaluated');
 
 function refreshActiveView() {
   if (document.body.classList.contains('widget-mode')) { refreshWidget(); return; }
@@ -43,12 +46,20 @@ window.api.onUsageChanged(() => {
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-initLocalTab();
-initAnalyticsTab();
-initStatsTab();
-initChatViewer();
-initWidget();
-initTheme();
-initPricingSettings(refreshActiveView);
+const initStart = performance.now();
+for (const [name, fn] of [
+  ['initLocalTab', initLocalTab],
+  ['initAnalyticsTab', initAnalyticsTab],
+  ['initStatsTab', initStatsTab],
+  ['initChatViewer', initChatViewer],
+  ['initWidget', initWidget],
+  ['initTheme', initTheme],
+  ['initPricingSettings', () => initPricingSettings(refreshActiveView)],
+]) {
+  const t = performance.now();
+  fn();
+  mark(`${name} took ${(performance.now() - t).toFixed(0)}ms`);
+}
+mark(`all init took ${(performance.now() - initStart).toFixed(0)}ms`);
 
-loadLocalUsage();
+timeAsync('first loadLocalUsage', loadLocalUsage);

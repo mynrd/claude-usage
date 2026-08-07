@@ -470,6 +470,52 @@ html { height: 100%; overflow: hidden; }
 }
 .project-item .proj-meta { font-size: 10px; color: var(--subtext); margin-top: 2px; }
 
+/* ── Loading state ─────────────────────────────────────────────────────
+   The shell paints immediately and every panel that waits on data shows a
+   shimmering placeholder of its own shape, so a slow first scan reads as
+   loading rather than as a frozen window. */
+.skel {
+  background: linear-gradient(90deg, var(--card-bd) 25%, var(--stripe) 50%, var(--card-bd) 75%);
+  background-size: 300% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  display: block;
+}
+@keyframes skel-shimmer {
+  0%   { background-position: 150% 0; }
+  100% { background-position: -150% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; }
+}
+.summary-stat .skel { height: 20px; width: 60%; margin: 0 auto 6px; }
+.summary-stat .skel-label { height: 9px; width: 40%; margin: 0 auto; }
+.project-item.is-skeleton { cursor: default; }
+.project-item.is-skeleton .skel { height: 12px; width: 70%; }
+.project-item.is-skeleton .skel-meta { height: 9px; width: 90%; margin-top: 5px; }
+.rate-window-bar .skel, .cli-usage-bar .skel { height: 14px; width: 240px; }
+
+.scan-progress {
+  font-size: 10px;
+  color: var(--subtext);
+  padding: 6px 10px 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.scan-progress .scan-track {
+  flex: 1;
+  height: 3px;
+  background: var(--card-bd);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.scan-progress .scan-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
 .project-detail-panel {
   background: var(--card-bg);
   border: 1px solid var(--card-bd);

@@ -18,6 +18,14 @@ function getDateRange() {
 // ── Main load ─────────────────────────────────────────────────────────────────
 
 export async function loadAnalytics() {
+  // Placeholder tiles while the parser aggregates — an empty panel reads as a
+  // hang on the first (uncached) scan.
+  const summaryEl = document.getElementById('analytics-summary');
+  if (summaryEl && !summaryEl.children.length) {
+    summaryEl.innerHTML = Array.from({ length: 4 }, () =>
+      '<div class="summary-stat"><span class="skel"></span><span class="skel skel-label"></span></div>').join('');
+  }
+
   const { from, to } = getDateRange();
   const data = await window.api.getAnalyticsData(from, to, getIncludeSubagents());
   lastDailyTotals = data.dailyTotals;

@@ -80,4 +80,8 @@ function getPricingForDate(modelKey, date) {
   return snapshot.prices.find(p => p.model === modelKey) || null;
 }
 
-module.exports = { loadHistory, getPricingForDate, getLatestSnapshot, saveSnapshot };
+// The parser worker holds its own memo of the history — the main process saves
+// the file, so the worker has to be told to re-read it.
+function resetHistory() { _history = null; }
+
+module.exports = { loadHistory, getPricingForDate, getLatestSnapshot, saveSnapshot, resetHistory };

@@ -2,10 +2,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { calcCost, calcCostBreakdown } = require('./pricing');
-
-function getClaudeProjectsDir() {
-  return path.join(os.homedir(), '.claude', 'projects');
-}
+const { count, tally } = require('./perf');
+const { getClaudeProjectsDir } = require('./paths');
+const scan = require('./scan-index');
 
 // Bucket by the user's local calendar day — toISOString() is UTC and would
 // shift early-morning usage onto the previous day.
@@ -25,7 +24,9 @@ function modelFamily(m) {
 // duplicate rows contribute 0; placeholder→final rows converge to the final
 // value. Returns the per-category delta to add, plus `first` (first sighting
 // of the key — used for turn counts). Rows without an id count as-is.
-// Takes a compact usage row: { id, requestId, input, output, cacheCreate, cacheRead }.
+// Takes a compact usage row: { key | id+requestId, input, output, cacheCreate, cacheRead }.
+// `key` is the pre-joined `id:requestId` cached rows carry (one string instead
+// of two shrinks the on-disk parse cache noticeably).
 function createUsageDeduper() {
   const seen = new Map();
   return (row) => {
@@ -35,8 +36,8 @@ function createUsageDeduper() {
       cacheCreate: row.cacheCreate || 0,
       cacheRead: row.cacheRead || 0,
     };
-    if (!row.id) return { ...cur, first: true };
-    const key = row.id + ':' + (row.requestId || '');
+    const key = row.key !== undefined ? row.key : (row.id ? row.id + ':' + (row.requestId || '') : null);
+    if (!key) return { ...cur, first: true };
     const prev = seen.get(key);
     if (!prev) { seen.set(key, cur); return { ...cur, first: true }; }
     const delta = { first: false };
@@ -54,19 +55,35 @@ function createUsageDeduper() {
 // Dedup is folder-scoped (resumed sessions copy history across files), so rows
 // are cached PRE-dedupe and the deduper is replayed per query — cheap, since
 // it iterates small in-memory arrays instead of re-parsing megabytes.
-const _fileCache = new Map(); // absPath -> { sig, title, agentSpawnIds, records }
+// entry: { sig, size, head, parsedBytes, title, agentSpawnIds, records }
+//   head       — base64 of the first HEAD_BYTES, to prove the file wasn't rewritten
+//   parsedBytes— offset of the byte after the last complete line consumed
+const _fileCache = new Map();
+const HEAD_BYTES = 256;
 
-function getFileUsage(absPath) {
-  let st;
-  try { st = fs.statSync(absPath); } catch { return null; }
-  const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
-  const hit = _fileCache.get(absPath);
-  if (hit && hit.sig === sig) return hit;
+function readRange(absPath, start, end) {
+  const len = end - start;
+  if (len <= 0) return Buffer.alloc(0);
+  let fd;
+  try {
+    fd = fs.openSync(absPath, 'r');
+    const buf = Buffer.allocUnsafe(len);
+    const read = fs.readSync(fd, buf, 0, len, start);
+    return read === len ? buf : buf.subarray(0, read);
+  } catch {
+    return Buffer.alloc(0);
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+  }
+}
 
-  const entry = { sig, title: null, agentSpawnIds: [], records: [] };
-  let text = '';
-  try { text = fs.readFileSync(absPath, 'utf8'); } catch {}
-  for (const line of text.trim().split('\n')) {
+// Feed complete lines into an entry. Returns the number of bytes consumed —
+// a trailing partial line (Claude is mid-write) is left for the next pass.
+function parseInto(entry, buf) {
+  const lastNl = buf.lastIndexOf(0x0a);
+  if (lastNl < 0) return 0;
+  const text = buf.subarray(0, lastNl + 1).toString('utf8');
+  for (const line of text.split('\n')) {
     if (!line) continue;
     try {
       const rec = JSON.parse(line);
@@ -79,9 +96,9 @@ function getFileUsage(absPath) {
       }
       if (rec.message?.usage) {
         const u = rec.message.usage;
+        const id = rec.message.id || null;
         entry.records.push({
-          id: rec.message.id || null,
-          requestId: rec.requestId || null,
+          key: id ? id + ':' + (rec.requestId || '') : null,
           ts: rec.timestamp ? Date.parse(rec.timestamp) : null,
           model: rec.message.model || null,
           input: u.input_tokens || 0,
@@ -92,27 +109,68 @@ function getFileUsage(absPath) {
       }
     } catch {}
   }
+  return lastNl + 1;
+}
+
+function getFileUsage(absPath) {
+  const st = scan.statFor(absPath);
+  if (!st) return null;
+  const sig = `${st.size}:${st.mtime}`;
+  const hit = _fileCache.get(absPath);
+  if (hit && hit.sig === sig) { count('sessionFilesCached'); return hit; }
+
+  const t0 = performance.now();
+
+  // Transcripts are append-only, so a file that only grew is parsed from where
+  // the last pass stopped. Without this, an active session's multi-MB
+  // transcript was re-read in full on every 2 s watcher tick.
+  if (hit && st.size > hit.parsedBytes && hit.head) {
+    const head = readRange(absPath, 0, Math.min(HEAD_BYTES, st.size)).toString('base64');
+    if (head === hit.head) {
+      const buf = readRange(absPath, hit.parsedBytes, st.size);
+      hit.parsedBytes += parseInto(hit, buf);
+      hit.sig = sig;
+      hit.size = st.size;
+      count('sessionFilesTailed');
+      count('sessionTailMbRead', buf.length / 1048576);
+      count('sessionParseMs', performance.now() - t0);
+      return hit;
+    }
+  }
+
+  count('sessionFilesParsed');
+  count('sessionMbRead', st.size / 1048576);
+  const entry = { sig, size: st.size, head: null, parsedBytes: 0, title: null, agentSpawnIds: [], records: [] };
+  let buf = Buffer.alloc(0);
+  try { buf = fs.readFileSync(absPath); } catch {}
+  entry.head = buf.subarray(0, HEAD_BYTES).toString('base64');
+  entry.parsedBytes = parseInto(entry, buf);
   _fileCache.set(absPath, entry);
+  count('sessionParseMs', performance.now() - t0);
   return entry;
 }
 
 // Folder scans share one deduper across session files (resumed/branched
 // sessions copy history into new files in the same folder). Scan oldest-first
 // so the original session keeps its tokens and a resumed copy dedups to only
-// its new turns (PLANNING.md D3).
+// its new turns (PLANNING.md D3). Order comes from the shared scan index.
 function listSessionFilesOldestFirst(dir) {
-  return fs.readdirSync(dir)
-    .filter(f => f.endsWith('.jsonl'))
-    .map(f => {
-      let mtime = 0;
-      try { mtime = Math.round(fs.statSync(path.join(dir, f)).mtimeMs); } catch {}
-      return { f, mtime };
-    })
-    .sort((a, b) => a.mtime - b.mtime || (a.f < b.f ? -1 : a.f > b.f ? 1 : 0))
-    .map(x => x.f);
+  const folder = scan.getIndex().folders.find(f => f.path === dir);
+  return folder ? folder.sessions.map(s => s.name) : [];
 }
 
+// Probing the filesystem to un-encode a folder name is stable for the life of
+// the process — memoize it instead of redoing 31 existsSync sweeps per query.
+const _nameCache = new Map();
 function resolveProjectName(folder) {
+  const hit = _nameCache.get(folder);
+  if (hit) return hit;
+  const res = tally('resolveProjectName', () => resolveProjectNameUncached(folder));
+  _nameCache.set(folder, res);
+  return res;
+}
+
+function resolveProjectNameUncached(folder) {
   const wtIdx = folder.indexOf('--claude-worktrees-');
   const encoded = wtIdx >= 0 ? folder.substring(0, wtIdx) : folder;
 
@@ -147,20 +205,21 @@ function resolveProjectName(folder) {
   return { displayName: path.basename(currentPath), fullPath: currentPath.replace(/\\/g, '/') };
 }
 
-function listLocalProjects(startDate, endDate, includeSub = false) {
-  const dir = getClaudeProjectsDir();
-  if (!fs.existsSync(dir)) return [];
+// onProgress({ done, total, project }) fires after each folder so the UI can
+// fill the list as results land instead of waiting for the whole scan.
+function listLocalProjects(startDate, endDate, includeSub = false, onProgress = null) {
+  const index = scan.getIndex();
 
   const dtStart = startDate ? new Date(startDate + 'T00:00:00') : null;
   const dtEnd   = endDate   ? new Date(endDate   + 'T23:59:59.999') : null;
 
   const projects = [];
-  for (const folder of fs.readdirSync(dir)) {
-    const fullPath = path.join(dir, folder);
-    if (!fs.statSync(fullPath).isDirectory()) continue;
-
-    const jsonlFiles = listSessionFilesOldestFirst(fullPath);
-    if (jsonlFiles.length === 0) continue;
+  const total = index.folders.length;
+  let done = 0;
+  for (const entry of index.folders) {
+    const folder = entry.folder;
+    const fullPath = entry.path;
+    const jsonlFiles = entry.sessions.map(s => s.name);
 
     const { displayName, fullPath: projectPath } = resolveProjectName(folder);
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
@@ -217,15 +276,19 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
       }
     }
 
+    let project = null;
     if ((!dtStart && !dtEnd) || hasMatchingRecords) {
-      projects.push({
+      project = {
         folder, name: displayName, fullPath: projectPath,
         sessionCount, totalInput, totalOutput, totalCacheCreate, totalCacheRead,
         totalTokens: totalInput + totalOutput + totalCacheCreate + totalCacheRead,
         totalCost, totalSavings, lastActive: lastActive ? lastActive.toISOString() : null,
         lastWriteMs,
-      });
+      };
+      projects.push(project);
     }
+    done++;
+    if (onProgress) onProgress({ done, total, project });
   }
 
   return projects.sort((a, b) => {
@@ -240,18 +303,8 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
 // (tool results, progress, streaming) — usage-record timestamps don't, they
 // go stale mid-turn during long tool runs.
 function sessionLastWriteMs(dir, jf) {
-  let m = 0;
-  try { m = Math.round(fs.statSync(path.join(dir, jf)).mtimeMs); } catch {}
-  const subdir = path.join(dir, jf.replace('.jsonl', ''), 'subagents');
-  if (fs.existsSync(subdir)) {
-    for (const f of listAgentTranscripts(subdir)) {
-      try {
-        const mm = Math.round(fs.statSync(f).mtimeMs);
-        if (mm > m) m = mm;
-      } catch {}
-    }
-  }
-  return m;
+  const s = scan.statFor(path.join(dir, jf));
+  return s && s.lastWriteMs !== undefined ? s.lastWriteMs : (s ? s.mtime : 0);
 }
 
 function getProjectDetail(folder, startDate, endDate, includeSub = false) {
@@ -374,11 +427,11 @@ function getTodayLocalSummary(includeSub = false) {
   const today = localDay(new Date());
   let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
 
-  for (const folder of fs.readdirSync(dir)) {
-    const fullPath = path.join(dir, folder);
-    if (!fs.statSync(fullPath).isDirectory()) continue;
+  for (const fEntry of scan.getIndex().folders) {
+    const folder = fEntry.folder;
+    const fullPath = fEntry.path;
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
-    for (const jf of listSessionFilesOldestFirst(fullPath)) {
+    for (const jf of fEntry.sessions.map(s => s.name)) {
       const entry = getFileUsage(path.join(fullPath, jf));
       const rows = entry ? entry.records : [];
       const sessionModel = (rows.find(r => r.model) || {}).model || null;
@@ -683,13 +736,19 @@ function subagentDirSignature(subdir) {
 }
 
 function getSessionSubagents(folder, sessionId) {
+  // File list and signature come from the shared scan index — this used to
+  // walk the subagent tree twice per session on every query.
+  const sess = scan.getSession(folder, sessionId);
   const subdir = path.join(getClaudeProjectsDir(), folder, sessionId, 'subagents');
-  if (!fs.existsSync(subdir)) return { agentCount: 0, agents: [], totals: null, daily: {} };
+  const agentFiles = sess ? sess.subFiles.map(f => f.file) : listAgentTranscripts(subdir);
+  if (!agentFiles.length) return { agentCount: 0, agents: [], totals: null, daily: {}, records: [] };
 
   const cacheKey = folder + '/' + sessionId;
-  const sig = subagentDirSignature(subdir);
+  const sig = sess ? sess.subSig : tally('subagentDirSig', () => subagentDirSignature(subdir));
   const cached = _subagentCache.get(cacheKey);
-  if (cached && cached.sig === sig) return cached.result;
+  if (cached && cached.sig === sig) { count('subagentSessionsCached'); return cached.result; }
+  const _t0 = performance.now();
+  count('subagentSessionsParsed');
 
   const byName = {};
   const totals = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0 };
@@ -706,7 +765,7 @@ function getSessionSubagents(folder, sessionId) {
   const dedupe = createUsageDeduper();
   const seenToolUseIds = new Set();
 
-  for (const jfPath of listAgentTranscripts(subdir)) {
+  for (const jfPath of agentFiles) {
     let firstUser = null;
     // Accumulate per model within the transcript — a subagent can run on more than
     // one model (e.g. an opus thread that delegates a step to haiku), and those have
@@ -715,6 +774,8 @@ function getSessionSubagents(folder, sessionId) {
     const ensure = (m) => perModel[m] || (perModel[m] = newAcc());
 
     try {
+      count('subagentFilesParsed');
+      count('subagentMbRead', (scan.statFor(jfPath)?.size || 0) / 1048576);
       for (const line of fs.readFileSync(jfPath, 'utf8').trim().split('\n')) {
         if (!line) continue;
         try {
@@ -815,6 +876,7 @@ function getSessionSubagents(folder, sessionId) {
 
   const result = { agentCount, agents, totals: agentCount ? totals : null, daily, records };
   _subagentCache.set(cacheKey, { sig, result });
+  count('subagentParseMs', performance.now() - _t0);
   return result;
 }
 
@@ -894,11 +956,11 @@ function getRateWindows(includeSub = true) {
   if (!fs.existsSync(dir)) return empty;
 
   const events = []; // { ts, input, output, cacheCreate, cacheRead, cost }
-  for (const folder of fs.readdirSync(dir)) {
-    const fullPath = path.join(dir, folder);
-    try { if (!fs.statSync(fullPath).isDirectory()) continue; } catch { continue; }
+  for (const fEntry of scan.getIndex().folders) {
+    const folder = fEntry.folder;
+    const fullPath = fEntry.path;
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
-    for (const jf of listSessionFilesOldestFirst(fullPath)) {
+    for (const jf of fEntry.sessions.map(s => s.name)) {
       const entry = getFileUsage(path.join(fullPath, jf));
       const rows = entry ? entry.records : [];
       const sessionModel = (rows.find(r => r.model) || {}).model || null;
@@ -1001,12 +1063,10 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
   const dailyMap = {};
   const projectMap = {};
 
-  for (const folder of fs.readdirSync(dir)) {
-    const fullPath = path.join(dir, folder);
-    if (!fs.statSync(fullPath).isDirectory()) continue;
-
-    const jsonlFiles = listSessionFilesOldestFirst(fullPath);
-    if (jsonlFiles.length === 0) continue;
+  for (const fEntry of scan.getIndex().folders) {
+    const folder = fEntry.folder;
+    const fullPath = fEntry.path;
+    const jsonlFiles = fEntry.sessions.map(s => s.name);
 
     const { displayName } = resolveProjectName(folder);
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
@@ -1076,4 +1136,8 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
   return { dailyTotals, projectTotals };
 }
 
-module.exports = { getClaudeProjectsDir, listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches };
+// The parse caches are handed to parse-cache.js so they can survive a restart —
+// a cold start otherwise re-reads every transcript on disk (352 MB here).
+function getCaches() { return { fileCache: _fileCache, subagentCache: _subagentCache }; }
+
+module.exports = { getClaudeProjectsDir, listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches, getCaches };

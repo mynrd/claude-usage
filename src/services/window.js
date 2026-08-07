@@ -1,5 +1,6 @@
 const { BrowserWindow, app } = require('electron');
 const path = require('path');
+const perf = require('./perf');
 
 let mainWindow;
 
@@ -17,6 +18,10 @@ function createWindow() {
     backgroundColor: '#F7F7F5',
     title: 'Claude Usage',
   });
+
+  mainWindow.once('ready-to-show',                 () => perf.mark('window ready-to-show'));
+  mainWindow.webContents.on('dom-ready',           () => perf.mark('window dom-ready'));
+  mainWindow.webContents.on('did-finish-load',     () => perf.mark('window did-finish-load'));
 
   mainWindow.loadFile(path.join(__dirname, '..', 'index.html'));
 

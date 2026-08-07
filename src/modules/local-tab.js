@@ -2,6 +2,7 @@ import { estimateCost, formatCost } from './pricing.js';
 import { escapeHtml, formatNum, toCsv, barColor } from './utils.js';
 import { openSessionChat } from './chat-viewer.js';
 import { getIncludeSubagents, setIncludeSubagents, getWindowCeiling, setWindowCeiling, getUsagePollMinutes, setUsagePollMinutes } from './settings.js';
+import { mark } from './perf.js';
 
 let currentProjects = [];
 let activeProjectFolder = null;
@@ -17,11 +18,7 @@ function getDateRange() {
 
 // ── Project List ──────────────────────────────────────────────────────────────
 
-export async function loadLocalUsage() {
-  const { from, to } = getDateRange();
-  const projects = await window.api.listProjects(from, to, getIncludeSubagents());
-  currentProjects = projects;
-
+function summaryHtml(projects) {
   const totalInput       = projects.reduce((s, p) => s + p.totalInput,        0);
   const totalOutput      = projects.reduce((s, p) => s + p.totalOutput,       0);
   const totalCacheCreate = projects.reduce((s, p) => s + p.totalCacheCreate,   0);
@@ -29,7 +26,7 @@ export async function loadLocalUsage() {
   const totalSavings     = projects.reduce((s, p) => s + (p.totalSavings || 0), 0);
   const totalTokens      = totalInput + totalOutput + totalCacheCreate + totalCacheRead;
 
-  document.getElementById('local-summary').innerHTML = `
+  return `
     <div class="summary-stat">
       <div class="stat-value">${formatNum(totalInput)}</div>
       <div class="stat-label">Input</div>
@@ -55,33 +52,102 @@ export async function loadLocalUsage() {
       <div class="stat-label">Total Tokens</div>
     </div>
   `;
+}
+
+function projectRowEl(p) {
+  const div = document.createElement('div');
+  div.className = 'project-item';
+  div.dataset.folder = p.folder;
+  if (p.folder === activeProjectFolder) div.classList.add('active');
+
+  const lastActiveStr = p.lastActive
+    ? new Date(p.lastActive).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    : 'N/A';
+
+  div.innerHTML = `
+    <div class="proj-name" title="${escapeHtml(p.fullPath || p.name)}">${liveDot(p.lastWriteMs)}${escapeHtml(p.name)}</div>
+    <div class="proj-meta">${formatNum(p.totalTokens)} tokens &middot; <span class="cost-badge">${formatCost(p.totalCost || 0)}</span> &middot; ${p.sessionCount} sessions &middot; ${lastActiveStr}</div>
+  `;
+  div.addEventListener('click', () => {
+    document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
+    div.classList.add('active');
+    activeProjectFolder = p.folder;
+    loadProjectDetail(p.folder, p.name, p.fullPath);
+  });
+  return div;
+}
+
+// ── Loading state ─────────────────────────────────────────────────────────────
+// The shell paints before any data exists, then folders stream in from the
+// parser worker as each finishes. A cold scan (empty parse cache) fills the
+// list progressively instead of showing an empty window until it is all done.
+
+let loadSeq = 0;        // identifies the in-flight scan; stale progress is dropped
+let detailLoadSeq = 0;  // same, for the detail panel
+let progressSeen = 0;
+
+function paintSkeleton() {
+  document.getElementById('local-summary').innerHTML = Array.from({ length: 6 }, (_, i) => `
+    <div class="summary-stat${i === 5 ? ' summary-stat-full' : ''}">
+      <span class="skel"></span>
+      <span class="skel skel-label"></span>
+    </div>`).join('');
+  document.getElementById('rate-window-bar').innerHTML = '<span class="skel"></span>';
+
+  const listEl = document.getElementById('project-list');
+  listEl.dataset.state = 'skeleton';
+  listEl.innerHTML = `
+    <div class="scan-progress" id="scan-progress">
+      <span id="scan-label">Reading transcripts…</span>
+      <span class="scan-track"><span class="scan-fill" id="scan-fill" style="width:0%"></span></span>
+    </div>` + Array.from({ length: 6 }, () => `
+    <div class="project-item is-skeleton">
+      <span class="skel"></span>
+      <span class="skel skel-meta"></span>
+    </div>`).join('');
+}
+
+function onScanProgress(payload) {
+  if (!payload || payload.seq !== loadSeq) return;    // superseded scan
+  const listEl = document.getElementById('project-list');
+  if (listEl.dataset.state !== 'skeleton') return;    // refresh: leave rows alone, no flicker
+
+  if (progressSeen === 0) {
+    // First result in — drop the placeholder rows but keep the progress bar.
+    listEl.querySelectorAll('.project-item.is-skeleton').forEach(el => el.remove());
+  }
+  progressSeen++;
+
+  const fill = document.getElementById('scan-fill');
+  const label = document.getElementById('scan-label');
+  if (fill) fill.style.width = `${Math.round((payload.done / payload.total) * 100)}%`;
+  if (label) label.textContent = `Reading transcripts… ${payload.done}/${payload.total} projects`;
+
+  if (payload.project) listEl.appendChild(projectRowEl(payload.project));
+}
+
+export async function loadLocalUsage() {
+  const seq = ++loadSeq;
+  progressSeen = 0;
+  const { from, to } = getDateRange();
+  const _t = performance.now();
+  const projects = await window.api.listProjects(from, to, getIncludeSubagents(), seq);
+  if (seq !== loadSeq) return;   // a newer scan started while this one was running
+  mark(`listProjects round-trip ${(performance.now() - _t).toFixed(0)}ms`, { projects: projects.length, from, to, sub: getIncludeSubagents() });
+  const _tRender = performance.now();
+  currentProjects = projects;
+
+  document.getElementById('local-summary').innerHTML = summaryHtml(projects);
 
   loadRateWindow(); // async, fills #rate-window-bar independently
 
+  // Final pass replaces anything that streamed in, in sorted order.
   const listEl = document.getElementById('project-list');
-  listEl.innerHTML = '';
-  for (const p of projects) {
-    const div = document.createElement('div');
-    div.className = 'project-item';
-    div.dataset.folder = p.folder;
-    if (p.folder === activeProjectFolder) div.classList.add('active');
+  listEl.dataset.state = 'live';
+  listEl.innerHTML = projects.length ? '' : '<div class="empty-state" style="padding:20px">No projects in range</div>';
+  for (const p of projects) listEl.appendChild(projectRowEl(p));
 
-    const lastActiveStr = p.lastActive
-      ? new Date(p.lastActive).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-      : 'N/A';
-
-    div.innerHTML = `
-      <div class="proj-name" title="${escapeHtml(p.fullPath || p.name)}">${liveDot(p.lastWriteMs)}${escapeHtml(p.name)}</div>
-      <div class="proj-meta">${formatNum(p.totalTokens)} tokens &middot; <span class="cost-badge">${formatCost(p.totalCost || 0)}</span> &middot; ${p.sessionCount} sessions &middot; ${lastActiveStr}</div>
-    `;
-    div.addEventListener('click', () => {
-      document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
-      div.classList.add('active');
-      activeProjectFolder = p.folder;
-      loadProjectDetail(p.folder, p.name, p.fullPath);
-    });
-    listEl.appendChild(div);
-  }
+  mark(`project list render ${(performance.now() - _tRender).toFixed(0)}ms`);
 
   if (activeProjectFolder) {
     const active = projects.find(p => p.folder === activeProjectFolder);
@@ -159,8 +225,10 @@ function renderRateWindow() {
 }
 
 async function loadRateWindow() {
+  const _t = performance.now();
   try {
     lastWindows = await window.api.getRateWindows(getIncludeSubagents());
+    mark(`getRateWindows round-trip ${(performance.now() - _t).toFixed(0)}ms`);
     renderRateWindow();
   } catch { /* bar stays empty */ }
 }
@@ -227,10 +295,12 @@ function renderCliUsageStatus() {
 async function loadCliUsage() {
   if (cliUsageLoading) return;
   cliUsageLoading = true;
+  const _t = performance.now();
   renderCliUsageStatus();
   if (!lastCliUsage) renderCliUsageBody();
   try {
     lastCliUsage = await window.api.getCliUsage();
+    mark(`getCliUsage round-trip ${(performance.now() - _t).toFixed(0)}ms`, { ok: !!lastCliUsage?.ok });
   } catch (e) {
     lastCliUsage = { ok: false, error: e.message, fetchedAt: Date.now() };
   } finally {
@@ -278,8 +348,18 @@ function initCliUsagePanel() {
 
 async function loadProjectDetail(folder, name, fullPath) {
   const { from, to } = getDateRange();
-  const detail = await window.api.getProjectDetail(folder, from, to, getIncludeSubagents());
   const panel = document.getElementById('project-detail');
+  const detailSeq = ++detailLoadSeq;
+
+  panel.innerHTML = `
+    <h3 style="font-size:14px;margin-bottom:4px;">${escapeHtml(name)}</h3>
+    <div style="font-size:11px;color:#888;margin-bottom:12px;">${escapeHtml(fullPath || name)}</div>
+    ${Array.from({ length: 5 }, () => '<span class="skel" style="height:14px;margin-bottom:8px;"></span>').join('')}`;
+
+  const _t = performance.now();
+  const detail = await window.api.getProjectDetail(folder, from, to, getIncludeSubagents());
+  if (detailSeq !== detailLoadSeq) return;   // another project was clicked meanwhile
+  mark(`getProjectDetail round-trip ${(performance.now() - _t).toFixed(0)}ms`, { sessions: detail.sessions.length });
 
   panel.innerHTML = `
     <h3 style="font-size:14px;margin-bottom:4px;">${escapeHtml(name)}</h3>
@@ -629,6 +709,9 @@ async function showModelDetailModal(session, folder) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 export function initLocalTab() {
+  // Paint placeholders before the first query so the window is never blank.
+  paintSkeleton();
+  window.api.onUsageProgress(onScanProgress);
   initModelDetailModal();
   initCliUsagePanel();
   // Local calendar date — toISOString() is UTC and lags behind until UTC midnight.

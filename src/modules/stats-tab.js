@@ -321,6 +321,13 @@ function renderStats() {
 }
 
 export async function loadStats() {
+  if (!statsData) {
+    const panel = document.querySelector('.stats-panel.active');
+    if (panel && !panel.children.length) {
+      panel.innerHTML = Array.from({ length: 4 }, () =>
+        '<span class="skel" style="height:16px;margin-bottom:10px;"></span>').join('');
+    }
+  }
   try { statsData = await window.api.getStatsCache(); }
   catch (e) { statsData = { ok: false, error: e.message }; }
 

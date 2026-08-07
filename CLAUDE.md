@@ -25,6 +25,38 @@ the user will say so and we adjust the design (collapse, dedupe, etc.) — we do
 When you handle a new shape, prefer matching the CLI's own wording (e.g. `Read <path> (N lines)`,
 `Referenced file <path>`).
 
+## Process layout (IMPORTANT — where work runs)
+
+Transcript parsing does **not** run in the main process. A cold scan reads every
+`.jsonl` under `~/.claude/projects` (350 MB+ on a working machine, ~1.2 s); doing that
+inside an `ipcMain.handle` froze the window for the whole duration.
+
+- [src/services/usage-worker.js](src/services/usage-worker.js) — Electron `utilityProcess`
+  that owns **all** transcript reading. Message protocol: `{id, op, args}` in,
+  `{type:'reply'|'progress', id, …}` out. Add new heavy queries here, never to main.
+- [src/services/worker-client.js](src/services/worker-client.js) — main-side bridge:
+  `call(op, args, onProgress)`. Calls before the worker is up are queued; a worker
+  crash rejects pending calls and the next call respawns it.
+- [src/services/ipc.js](src/services/ipc.js) — handlers are thin: they forward to the
+  worker and stream `usage-progress` events to the renderer. Only config, price-snapshot
+  reads, the save dialog and window sizing run in main.
+- [src/services/scan-index.js](src/services/scan-index.js) — one readdir+stat sweep of
+  the projects dir, reused by every query in a refresh burst and dropped when the
+  watcher fires. Nothing should stat transcripts directly; go through `getIndex()`
+  or `statFor()`.
+- [src/services/parse-cache.js](src/services/parse-cache.js) — writes the parse caches
+  to `<userData>/data/parse-cache.json` so a restart doesn't re-read every transcript.
+  Records are tuples with an interned model table (~4 MB for 1200 files). Subagent
+  aggregates bake in costs, so they're keyed by a price signature and dropped when
+  rates change; the file cache holds raw tokens and always survives.
+- Transcripts are append-only, so `getFileUsage()` tail-parses a grown file from
+  `parsedBytes` after checking its first 256 bytes are unchanged. A full re-read only
+  happens when a file is rewritten or is new.
+- [src/services/perf.js](src/services/perf.js) / [src/modules/perf.js](src/modules/perf.js) —
+  timing to `perf.log` (repo root, gitignored). Every IPC handler and worker op is timed;
+  hot helpers report counters (`sessionFilesParsed`, `sessionMbRead`, `scanIndexReused`, …)
+  that are attributed to whichever timed span they occurred in.
+
 ## Where the code lives
 
 - [src/services/projects.js](src/services/projects.js) — `getSessionChat()` parses JSONL into
