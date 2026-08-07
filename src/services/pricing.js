@@ -57,7 +57,9 @@ function getModelKey(modelName) {
   return match[3] != null ? `${match[1]}-${match[2]}.${match[3]}` : `${match[1]}-${match[2]}`;
 }
 
-// Returns cost split by token type: { input, output, cacheCreate, cacheRead }
+// Returns cost split by token type: { input, output, cacheCreate, cacheRead },
+// plus `cacheReadSavings` — what the cache-read tokens would have cost extra at
+// the full input rate (i.e. the money prompt caching saved).
 function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date) {
   const key  = getModelKey(modelName);
   const hist = getPricingForDate(key, date || null);
@@ -67,6 +69,7 @@ function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, dat
       output:      (output / 1e6) * hist.output,
       cacheCreate: (cacheCreate / 1e6) * hist.cacheWrite5m,
       cacheRead:   (cacheRead / 1e6) * hist.cacheRead,
+      cacheReadSavings: (cacheRead / 1e6) * Math.max(0, hist.input - hist.cacheRead),
     };
   }
   const p = getModelPricing(modelName);
@@ -75,6 +78,7 @@ function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, dat
     output:      (output / 1e6) * p.output,
     cacheCreate: (cacheCreate / 1e6) * p.input * 1.25,
     cacheRead:   (cacheRead / 1e6) * p.input * 0.10,
+    cacheReadSavings: (cacheRead / 1e6) * p.input * 0.90,
   };
 }
 

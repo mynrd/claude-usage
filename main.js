@@ -18,9 +18,10 @@ if (!gotLock) {
   });
 }
 
-const { createWindow, getMainWindow } = require('./src/services/window');
-const { createTray }                  = require('./src/services/tray');
-const { setupIpc }                    = require('./src/services/ipc');
+const { createWindow, getMainWindow }   = require('./src/services/window');
+const { createTray, updateTrayTooltip } = require('./src/services/tray');
+const { setupIpc }                      = require('./src/services/ipc');
+const { startWatcher }                  = require('./src/services/watcher');
 
 setupIpc(getMainWindow);
 
@@ -28,6 +29,15 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
   createTray(getMainWindow);
+
+  startWatcher(() => {
+    const win = getMainWindow();
+    if (win && !win.isDestroyed()) win.webContents.send('usage-changed');
+    updateTrayTooltip();
+  });
+  // Defer the first tooltip — the renderer's initial load warms the parse
+  // cache, making this near-free instead of a second cold scan.
+  setTimeout(updateTrayTooltip, 8000);
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

@@ -1,7 +1,7 @@
 import { estimateCost, formatCost } from './pricing.js';
-import { escapeHtml, formatNum } from './utils.js';
+import { escapeHtml, formatNum, toCsv, barColor } from './utils.js';
 import { openSessionChat } from './chat-viewer.js';
-import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
+import { getIncludeSubagents, setIncludeSubagents, getWindowCeiling, setWindowCeiling, getUsagePollMinutes, setUsagePollMinutes } from './settings.js';
 
 let currentProjects = [];
 let activeProjectFolder = null;
@@ -26,6 +26,7 @@ export async function loadLocalUsage() {
   const totalOutput      = projects.reduce((s, p) => s + p.totalOutput,       0);
   const totalCacheCreate = projects.reduce((s, p) => s + p.totalCacheCreate,   0);
   const totalCacheRead   = projects.reduce((s, p) => s + p.totalCacheRead,     0);
+  const totalSavings     = projects.reduce((s, p) => s + (p.totalSavings || 0), 0);
   const totalTokens      = totalInput + totalOutput + totalCacheCreate + totalCacheRead;
 
   document.getElementById('local-summary').innerHTML = `
@@ -45,11 +46,17 @@ export async function loadLocalUsage() {
       <div class="stat-value">${formatNum(totalCacheRead)}</div>
       <div class="stat-label">Cache Read</div>
     </div>
+    <div class="summary-stat" title="What the cache-read tokens would have cost extra at the full input rate">
+      <div class="stat-value stat-savings">${formatCost(totalSavings)}</div>
+      <div class="stat-label">Cache Saved</div>
+    </div>
     <div class="summary-stat summary-stat-full">
       <div class="stat-value">${formatNum(totalTokens)}</div>
       <div class="stat-label">Total Tokens</div>
     </div>
   `;
+
+  loadRateWindow(); // async, fills #rate-window-bar independently
 
   const listEl = document.getElementById('project-list');
   listEl.innerHTML = '';
@@ -64,7 +71,7 @@ export async function loadLocalUsage() {
       : 'N/A';
 
     div.innerHTML = `
-      <div class="proj-name" title="${escapeHtml(p.fullPath || p.name)}">${escapeHtml(p.name)}</div>
+      <div class="proj-name" title="${escapeHtml(p.fullPath || p.name)}">${liveDot(p.lastWriteMs)}${escapeHtml(p.name)}</div>
       <div class="proj-meta">${formatNum(p.totalTokens)} tokens &middot; <span class="cost-badge">${formatCost(p.totalCost || 0)}</span> &middot; ${p.sessionCount} sessions &middot; ${lastActiveStr}</div>
     `;
     div.addEventListener('click', () => {
@@ -80,6 +87,191 @@ export async function loadLocalUsage() {
     const active = projects.find(p => p.folder === activeProjectFolder);
     if (active) loadProjectDetail(active.folder, active.name, active.fullPath);
   }
+}
+
+// ── Rate window bar ───────────────────────────────────────────────────────────
+// Token counts are exact (local transcripts); the ceiling is the user's own
+// estimate since Anthropic doesn't publish plan quotas — label it as such.
+
+let lastWindows = null;
+
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+function renderRateWindow() {
+  const el = document.getElementById('rate-window-bar');
+  if (!el || !lastWindows) return;
+  const { current, week, avgWindowTotal, now } = lastWindows;
+
+  const weekHtml = `<span class="rw-fig" title="Rolling 7 days, all projects">7-day: <strong>${formatNum(week.total)}</strong> · ${formatCost(week.cost)}</span>`;
+
+  if (!current) {
+    el.innerHTML = `
+      <div class="rw-head">
+        <span class="rw-title">5h window</span>
+        <span class="rw-idle">No active window — the next one starts with your next message</span>
+        ${weekHtml}
+      </div>`;
+    return;
+  }
+
+  const elapsedMs = Math.max(now - current.start, 5 * 60 * 1000);
+  const perHour = current.total / (elapsedMs / 3600000);
+  const pace = avgWindowTotal > 0 ? current.total / avgWindowTotal : 0;
+  const ceiling = getWindowCeiling();
+
+  let gauge = '';
+  if (ceiling > 0) {
+    const pct = Math.min(100, (current.total / ceiling) * 100);
+    let eta = '';
+    if (current.total >= ceiling) {
+      eta = 'estimate reached';
+    } else if (perHour > 0) {
+      const hitMs = now + ((ceiling - current.total) / perHour) * 3600000;
+      eta = hitMs < current.end ? `~hits ${fmtTime(hitMs)}` : 'window resets first';
+    }
+    gauge = `
+      <div class="rw-gauge">
+        <div class="rw-track"><div class="rw-fill" style="width:${pct.toFixed(1)}%;background:${barColor(pct)}"></div></div>
+        <span class="rw-pct">${pct.toFixed(0)}% of ${formatNum(ceiling)} (your estimate)${eta ? ` · ${eta}` : ''}</span>
+      </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="rw-head">
+      <span class="rw-title">5h window</span>
+      <span class="rw-time">${fmtTime(current.start)} – ${fmtTime(current.end)}</span>
+      <span class="rw-fig"><strong>${formatNum(current.total)}</strong> tokens · ${formatCost(current.cost)}</span>
+      <span class="rw-fig">${formatNum(Math.round(perHour))}/hr</span>
+      ${pace > 0 ? `<span class="rw-pace" title="vs your average completed window">${pace.toFixed(1)}× avg</span>` : ''}
+      ${weekHtml}
+      <label class="rw-limit" title="Your own per-window token estimate — Anthropic doesn't publish plan quotas. 0 clears it.">
+        Limit <input id="rw-ceiling" type="number" min="0" step="10" value="${ceiling ? Math.round(ceiling / 1e6) : ''}" placeholder="–" />M
+      </label>
+    </div>
+    ${gauge}`;
+
+  el.querySelector('#rw-ceiling').addEventListener('change', (e) => {
+    setWindowCeiling((parseFloat(e.target.value) || 0) * 1e6);
+    renderRateWindow();
+  });
+}
+
+async function loadRateWindow() {
+  try {
+    lastWindows = await window.api.getRateWindows(getIncludeSubagents());
+    renderRateWindow();
+  } catch { /* bar stays empty */ }
+}
+
+// ── Plan usage (claude /usage) ─────────────────────────────────────────────────
+// The rate-window bar above is a local-transcript *estimate*. This panel shows
+// the *official* figures by shelling out to Claude Code's own `/usage` command
+// on a configurable interval. The controls shell is rendered once; only #cu-body
+// and #cu-status update on refresh so the interval input never gets wiped mid-type.
+
+let lastCliUsage = null;
+let cliUsageLoading = false;
+let cliPollTimer = null;
+
+function fmtClock(ms) {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+function renderCliUsageBody() {
+  const body = document.getElementById('cu-body');
+  if (!body) return;
+
+  if (!lastCliUsage) {
+    body.innerHTML = cliUsageLoading
+      ? '<div class="cu-msg subtle">Running <code>claude /usage</code>…</div>'
+      : '<div class="cu-msg subtle">Not fetched yet.</div>';
+    return;
+  }
+
+  if (!lastCliUsage.ok) {
+    body.innerHTML = `<div class="cu-msg cu-error">Couldn't read usage: ${escapeHtml(lastCliUsage.error || 'unknown error')}</div>`;
+    return;
+  }
+
+  if (!lastCliUsage.limits.length) {
+    // Parsed nothing — surface the raw text so an unrecognized format is visible.
+    body.innerHTML = `<pre class="cu-raw">${escapeHtml(lastCliUsage.raw || '(empty output)')}</pre>`;
+    return;
+  }
+
+  const gauges = lastCliUsage.limits.map(l => {
+    const pct = Math.max(0, Math.min(100, l.pct));
+    return `
+      <div class="cu-limit">
+        <div class="cu-limit-head">
+          <span class="cu-limit-label">${escapeHtml(l.label)}</span>
+          <span class="cu-limit-pct">${l.pct}%</span>
+          ${l.resets ? `<span class="cu-limit-reset" title="Resets">resets ${escapeHtml(l.resets)}</span>` : ''}
+        </div>
+        <div class="cu-track"><div class="cu-fill" style="width:${pct}%;background:${barColor(pct)}"></div></div>
+      </div>`;
+  }).join('');
+
+  body.innerHTML = (lastCliUsage.plan ? `<div class="cu-plan subtle">${escapeHtml(lastCliUsage.plan)}</div>` : '') + gauges;
+}
+
+function renderCliUsageStatus() {
+  const el = document.getElementById('cu-status');
+  if (!el) return;
+  if (cliUsageLoading) { el.textContent = 'refreshing…'; return; }
+  el.textContent = lastCliUsage ? `updated ${fmtClock(lastCliUsage.fetchedAt)}` : '';
+}
+
+async function loadCliUsage() {
+  if (cliUsageLoading) return;
+  cliUsageLoading = true;
+  renderCliUsageStatus();
+  if (!lastCliUsage) renderCliUsageBody();
+  try {
+    lastCliUsage = await window.api.getCliUsage();
+  } catch (e) {
+    lastCliUsage = { ok: false, error: e.message, fetchedAt: Date.now() };
+  } finally {
+    cliUsageLoading = false;
+    renderCliUsageBody();
+    renderCliUsageStatus();
+  }
+}
+
+function restartCliPoll() {
+  if (cliPollTimer) { clearInterval(cliPollTimer); cliPollTimer = null; }
+  const min = getUsagePollMinutes();
+  if (min > 0) cliPollTimer = setInterval(loadCliUsage, min * 60_000);
+}
+
+function initCliUsagePanel() {
+  const bar = document.getElementById('cli-usage-bar');
+  if (!bar) return;
+  const min = getUsagePollMinutes();
+  bar.innerHTML = `
+    <div class="cu-head">
+      <span class="cu-title">Plan usage</span>
+      <code class="cu-src" title="Runs Claude Code's own /usage command">claude /usage</code>
+      <span class="cu-status" id="cu-status"></span>
+      <button id="cu-refresh" class="btn btn-small" title="Run claude /usage now">&#8635; Refresh</button>
+      <label class="cu-interval" title="How often to run claude /usage automatically. 0 = manual only.">
+        every <input id="cu-interval" type="number" min="0" step="1" value="${min}" /> min
+      </label>
+    </div>
+    <div class="cu-body" id="cu-body"></div>`;
+
+  bar.querySelector('#cu-refresh').addEventListener('click', loadCliUsage);
+  bar.querySelector('#cu-interval').addEventListener('change', (e) => {
+    setUsagePollMinutes(parseInt(e.target.value, 10) || 0);
+    e.target.value = getUsagePollMinutes();
+    restartCliPoll();
+  });
+
+  renderCliUsageBody();
+  loadCliUsage();      // initial fetch
+  restartCliPoll();    // schedule recurring
 }
 
 // ── Project Detail ────────────────────────────────────────────────────────────
@@ -123,6 +315,30 @@ function shortModel(m) {
   return `${match[1]}-${match[2]}${minor}`;
 }
 
+// ── Live indicator ────────────────────────────────────────────────────────────
+// A session/project is "live" when its transcript (or a subagent transcript)
+// was WRITTEN to recently — Claude writes something on every step (streaming,
+// tool results, progress), so file mtime tracks "working" through tool runs
+// where usage-record timestamps go stale. Dots light up on refresh (the file
+// watcher fires on every write) and a timer dims them once writes stop. A
+// quiet long-running tool (no output yet) can still dim the dot briefly —
+// there is no end-of-turn marker in the transcript to do better.
+
+const LIVE_MS = 45_000;
+
+function liveDot(lastWriteMs) {
+  const on = lastWriteMs && (Date.now() - lastWriteMs) < LIVE_MS;
+  return `<span class="live-dot${on ? ' on' : ''}" data-last="${lastWriteMs || ''}" title="Claude is working here"></span>`;
+}
+
+function updateLiveDots() {
+  document.querySelectorAll('.live-dot').forEach(el => {
+    const last = Number(el.dataset.last);
+    const on = last > 0 && (Date.now() - last) < LIVE_MS;
+    el.classList.toggle('on', on);
+  });
+}
+
 const CHAT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
 const DETAIL_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
 
@@ -140,7 +356,7 @@ function renderSessionRows(sessions) {
     const modelHtml = models.length === 0 ? 'N/A'
       : models.map(m => `<span class="model-badge model-${shortModel(m).split('-')[0]}">${shortModel(m)}</span>`).join(' ');
     return `<tr class="session-row" data-sid="${s.sessionId}">
-      <td class="session-name" title="${s.title ? s.sessionId : ''}">${displayName} ${idSuffix} ${subagentBadge}</td>
+      <td class="session-name" title="${s.title ? s.sessionId : ''}">${liveDot(s.lastWriteMs)}${displayName} ${idSuffix} ${subagentBadge}</td>
       <td>${modelHtml}</td>
       <td class="tok-total">${formatNum(total)} <span class="tok-cost">(${formatCost(s.cost || 0)})</span></td>
       <td class="session-actions">
@@ -174,6 +390,7 @@ function renderSessionsTab(detail, folder) {
   sessEl.innerHTML = `
     <div class="session-search-bar">
       <input type="text" id="session-search" class="search-input" placeholder="Search sessions (title &amp; content)..." />
+      <button id="btn-export-sessions" class="btn btn-small" title="Export session rows as CSV">Export CSV</button>
     </div>
     <table class="session-table">
       <thead><tr>
@@ -183,6 +400,15 @@ function renderSessionsTab(detail, folder) {
     </table>
   `;
   bindSessionClicks(sessEl, folder);
+
+  sessEl.querySelector('#btn-export-sessions').addEventListener('click', () => {
+    const rows = [['Session ID', 'Title', 'Models', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Total', 'Cost (USD)', 'Started', 'Last Active']];
+    for (const s of detail.sessions) {
+      rows.push([s.sessionId, s.title || '', (s.models || []).join(' '), s.input, s.output,
+        s.cacheCreate, s.cacheRead, s.total, (s.cost || 0).toFixed(4), s.startedAt || '', s.lastAt || '']);
+    }
+    window.api.exportFile('sessions.csv', toCsv(rows));
+  });
 
   let searchTimer = null;
   sessEl.querySelector('#session-search').addEventListener('input', (e) => {
@@ -225,11 +451,21 @@ function renderDailyTab(detail) {
   }).join('');
 
   dailyEl.innerHTML = `
+    <div class="detail-export-bar"><button id="btn-export-daily" class="btn btn-small" title="Export daily totals as CSV">Export CSV</button></div>
     <table class="daily-table">
       <thead><tr><th>Date</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th></tr></thead>
       <tbody>${dRows}</tbody>
     </table>
   `;
+
+  dailyEl.querySelector('#btn-export-daily').addEventListener('click', () => {
+    const rows = [['Date', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Cost (USD)']];
+    for (const d of detail.dailyTotals) {
+      const cost = d.cost != null ? d.cost : estimateCost(d.input, d.output, d.cacheCreate, d.cacheRead, null);
+      rows.push([d.date, d.input, d.output, d.cacheCreate, d.cacheRead, cost.toFixed(4)]);
+    }
+    window.api.exportFile('daily-totals.csv', toCsv(rows));
+  });
 }
 
 // ── Detail Chart ──────────────────────────────────────────────────────────────
@@ -394,6 +630,7 @@ async function showModelDetailModal(session, folder) {
 
 export function initLocalTab() {
   initModelDetailModal();
+  initCliUsagePanel();
   // Local calendar date — toISOString() is UTC and lags behind until UTC midnight.
   const today = new Date().toLocaleDateString('en-CA');
   document.getElementById('local-date-from').value = today;
@@ -406,6 +643,10 @@ export function initLocalTab() {
     document.getElementById('local-date-to').value = '';
     loadLocalUsage();
   });
+
+  // Dim live dots once a session goes quiet — the watcher only fires on
+  // writes, so without this a dot would stay lit after Claude stops.
+  setInterval(updateLiveDots, 10_000);
 
   const toggle = document.getElementById('toggle-subagents-local');
   toggle.checked = getIncludeSubagents();

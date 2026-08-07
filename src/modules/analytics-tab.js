@@ -1,4 +1,4 @@
-import { formatNum } from './utils.js';
+import { formatNum, toCsv } from './utils.js';
 import { formatCost } from './pricing.js';
 import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
 
@@ -6,6 +6,7 @@ let chartDailyTokens  = null;
 let chartDailyCost    = null;
 let chartBreakdown    = null;
 let chartTopProjects  = null;
+let lastDailyTotals   = [];
 
 function getDateRange() {
   return {
@@ -19,6 +20,7 @@ function getDateRange() {
 export async function loadAnalytics() {
   const { from, to } = getDateRange();
   const data = await window.api.getAnalyticsData(from, to, getIncludeSubagents());
+  lastDailyTotals = data.dailyTotals;
 
   renderSummary(data);
   renderDailyTokensChart(data.dailyTotals);
@@ -37,9 +39,10 @@ function renderSummary(data) {
       acc.cacheCreate += d.cacheCreate;
       acc.cacheRead   += d.cacheRead;
       acc.cost        += d.cost;
+      acc.savings     += d.savings || 0;
       return acc;
     },
-    { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 }
+    { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0 }
   );
   const totalTokens = totals.input + totals.output + totals.cacheCreate + totals.cacheRead;
   const days = data.dailyTotals.length;
@@ -62,6 +65,10 @@ function renderSummary(data) {
     <div class="summary-stat">
       <div class="stat-value">${formatNum(totals.cacheCreate + totals.cacheRead)}</div>
       <div class="stat-label">Cache Tokens</div>
+    </div>
+    <div class="summary-stat" title="What the cache-read tokens would have cost extra at the full input rate">
+      <div class="stat-value stat-savings">${formatCost(totals.savings)}</div>
+      <div class="stat-label">Cache Saved</div>
     </div>
     <div class="summary-stat">
       <div class="stat-value">${days}</div>
@@ -130,7 +137,12 @@ function renderDailyTokensChart(dailyTotals) {
   });
 }
 
-// ── Chart 2: Daily Cost (line) ────────────────────────────────────────────────
+// ── Chart 2: Daily Cost (stacked bar by model family) ─────────────────────────
+
+const FAMILY_COLORS = {
+  opus: '#CC785C', sonnet: '#4A90D9', haiku: '#22C55E',
+  fable: '#9B59B6', mythos: '#D946EF', other: '#9CA3AF',
+};
 
 function renderDailyCostChart(dailyTotals) {
   const ctx = document.getElementById('chart-daily-cost');
@@ -141,20 +153,25 @@ function renderDailyCostChart(dailyTotals) {
   const labels = dailyTotals.map(d => d.date);
   const noData = dailyTotals.length === 0;
 
+  // Only the families that actually appear, ordered by total spend.
+  const famTotals = {};
+  for (const d of dailyTotals) {
+    for (const [fam, cost] of Object.entries(d.costByModel || {})) {
+      famTotals[fam] = (famTotals[fam] || 0) + cost;
+    }
+  }
+  const families = Object.keys(famTotals).sort((a, b) => famTotals[b] - famTotals[a]);
+
   chartDailyCost = new Chart(ctx, {
-    type: 'line',
+    type: 'bar',
     data: {
       labels: noData ? ['No data'] : labels,
-      datasets: noData ? [] : [{
-        label: 'Cost (USD)',
-        data: dailyTotals.map(d => +d.cost.toFixed(4)),
-        borderColor: c.green,
-        backgroundColor: c.green + '22',
-        fill: true,
-        tension: 0.3,
-        pointRadius: dailyTotals.length > 30 ? 2 : 4,
-        pointHoverRadius: 6,
-      }],
+      datasets: noData ? [] : families.map(fam => ({
+        label: fam,
+        data: dailyTotals.map(d => +((d.costByModel || {})[fam] || 0).toFixed(4)),
+        backgroundColor: FAMILY_COLORS[fam] || FAMILY_COLORS.other,
+        stack: 'cost',
+      })),
     },
     options: {
       responsive: true,
@@ -162,12 +179,12 @@ function renderDailyCostChart(dailyTotals) {
       plugins: {
         legend: { position: 'top', labels: { boxWidth: 10, font: { size: 10 }, color: c.textColor } },
         tooltip: {
-          callbacks: { label: ctx => ' ' + formatCost(ctx.parsed.y) },
+          callbacks: { label: ctx => ` ${ctx.dataset.label}: ${formatCost(ctx.parsed.y)}` },
         },
       },
       scales: {
-        x: { ticks: { font: { size: 10 }, color: c.subtext, maxRotation: 45 }, grid: { color: c.gridColor } },
-        y: { ticks: { callback: v => formatCost(v), font: { size: 10 }, color: c.subtext }, grid: { color: c.gridColor } },
+        x: { stacked: true, ticks: { font: { size: 10 }, color: c.subtext, maxRotation: 45 }, grid: { color: c.gridColor } },
+        y: { stacked: true, ticks: { callback: v => formatCost(v), font: { size: 10 }, color: c.subtext }, grid: { color: c.gridColor } },
       },
     },
   });
@@ -268,6 +285,14 @@ export function initAnalyticsTab() {
     document.getElementById('analytics-date-from').value = '';
     document.getElementById('analytics-date-to').value = '';
     loadAnalytics();
+  });
+
+  document.getElementById('btn-export-analytics').addEventListener('click', () => {
+    const rows = [['Date', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Cost (USD)', 'Cache Saved (USD)']];
+    for (const d of lastDailyTotals) {
+      rows.push([d.date, d.input, d.output, d.cacheCreate, d.cacheRead, d.cost.toFixed(4), (d.savings || 0).toFixed(4)]);
+    }
+    window.api.exportFile('claude-usage-daily.csv', toCsv(rows));
   });
 
   const toggle = document.getElementById('toggle-subagents-analytics');

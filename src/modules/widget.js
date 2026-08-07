@@ -1,8 +1,12 @@
 import { estimateCost, formatCost } from './pricing.js';
-import { formatNum } from './utils.js';
-import { getIncludeSubagents } from './settings.js';
+import { formatNum, barColor } from './utils.js';
+import { getIncludeSubagents, getWindowCeiling } from './settings.js';
 
-async function enterWidget() {
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+export async function refreshWidget() {
   const localEl = document.getElementById('widget-local');
   try {
     const today = await window.api.getTodaySummary(getIncludeSubagents());
@@ -21,6 +25,35 @@ async function enterWidget() {
     localEl.innerHTML = '<div style="color:#8A8A8A;font-size:12px">Unable to load local data</div>';
   }
 
+  const winEl = document.getElementById('widget-window');
+  try {
+    const { current, now } = await window.api.getRateWindows(getIncludeSubagents());
+    if (!current) {
+      winEl.innerHTML = '<div class="widget-local-stat">No active window</div>';
+    } else {
+      const elapsedMs = Math.max(now - current.start, 5 * 60 * 1000);
+      const perHour = current.total / (elapsedMs / 3600000);
+      const ceiling = getWindowCeiling();
+      let gauge = '';
+      if (ceiling > 0) {
+        const pct = Math.min(100, (current.total / ceiling) * 100);
+        gauge = `<div class="rw-track"><div class="rw-fill" style="width:${pct.toFixed(1)}%;background:${barColor(pct)}"></div></div>`;
+      }
+      winEl.innerHTML = `
+        <div class="widget-local-stat">
+          ${fmtTime(current.start)} – ${fmtTime(current.end)} &middot;
+          <strong>${formatNum(current.total)}</strong> tokens &middot; <span class="cost-total">${formatCost(current.cost)}</span><br>
+          ${formatNum(Math.round(perHour))}/hr
+        </div>
+        ${gauge}`;
+    }
+  } catch {
+    winEl.innerHTML = '';
+  }
+}
+
+async function enterWidget() {
+  await refreshWidget();
   document.body.classList.add('widget-mode');
   await window.api.enterWidgetMode();
 }

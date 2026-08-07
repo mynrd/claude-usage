@@ -13,26 +13,30 @@ function localDay(dt) {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 
+function modelFamily(m) {
+  const match = (m || '').match(/fable|mythos|opus|sonnet|haiku/);
+  return match ? match[0] : 'other';
+}
+
 // Claude Code writes the JSONL during streaming, so one API response
 // (message.id + requestId) appears as several lines, each carrying a copy of
 // the usage object — raw sums overcount 2-20x (PLANNING.md F1/F2). Per key,
 // each usage category counts once at the highest value observed: identical
 // duplicate rows contribute 0; placeholder→final rows converge to the final
 // value. Returns the per-category delta to add, plus `first` (first sighting
-// of the key — used for turn counts). Records without message.id count as-is.
+// of the key — used for turn counts). Rows without an id count as-is.
+// Takes a compact usage row: { id, requestId, input, output, cacheCreate, cacheRead }.
 function createUsageDeduper() {
   const seen = new Map();
-  return (rec) => {
-    const u = rec.message.usage;
+  return (row) => {
     const cur = {
-      input: u.input_tokens || 0,
-      output: u.output_tokens || 0,
-      cacheCreate: u.cache_creation_input_tokens || 0,
-      cacheRead: u.cache_read_input_tokens || 0,
+      input: row.input || 0,
+      output: row.output || 0,
+      cacheCreate: row.cacheCreate || 0,
+      cacheRead: row.cacheRead || 0,
     };
-    const id = rec.message.id;
-    if (!id) return { ...cur, first: true };
-    const key = id + ':' + (rec.requestId || '');
+    if (!row.id) return { ...cur, first: true };
+    const key = row.id + ':' + (row.requestId || '');
     const prev = seen.get(key);
     if (!prev) { seen.set(key, cur); return { ...cur, first: true }; }
     const delta = { first: false };
@@ -42,6 +46,54 @@ function createUsageDeduper() {
     }
     return delta;
   };
+}
+
+// ── Per-file parse cache ──────────────────────────────────────────────────────
+// Parsing the JSONL is the expensive part (MBs of text per file, re-read on
+// every refresh). Cache each file's extracted usage rows keyed by size+mtime.
+// Dedup is folder-scoped (resumed sessions copy history across files), so rows
+// are cached PRE-dedupe and the deduper is replayed per query — cheap, since
+// it iterates small in-memory arrays instead of re-parsing megabytes.
+const _fileCache = new Map(); // absPath -> { sig, title, agentSpawnIds, records }
+
+function getFileUsage(absPath) {
+  let st;
+  try { st = fs.statSync(absPath); } catch { return null; }
+  const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
+  const hit = _fileCache.get(absPath);
+  if (hit && hit.sig === sig) return hit;
+
+  const entry = { sig, title: null, agentSpawnIds: [], records: [] };
+  let text = '';
+  try { text = fs.readFileSync(absPath, 'utf8'); } catch {}
+  for (const line of text.trim().split('\n')) {
+    if (!line) continue;
+    try {
+      const rec = JSON.parse(line);
+      if (rec.type === 'ai-title' && rec.aiTitle) entry.title = rec.aiTitle;
+      if (rec.type !== 'assistant') continue;
+      if (Array.isArray(rec.message?.content)) {
+        for (const b of rec.message.content) {
+          if (b.type === 'tool_use' && b.name === 'Agent') entry.agentSpawnIds.push(b.id || null);
+        }
+      }
+      if (rec.message?.usage) {
+        const u = rec.message.usage;
+        entry.records.push({
+          id: rec.message.id || null,
+          requestId: rec.requestId || null,
+          ts: rec.timestamp ? Date.parse(rec.timestamp) : null,
+          model: rec.message.model || null,
+          input: u.input_tokens || 0,
+          output: u.output_tokens || 0,
+          cacheCreate: u.cache_creation_input_tokens || 0,
+          cacheRead: u.cache_read_input_tokens || 0,
+        });
+      }
+    } catch {}
+  }
+  _fileCache.set(absPath, entry);
+  return entry;
 }
 
 // Folder scans share one deduper across session files (resumed/branched
@@ -113,38 +165,33 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
     const { displayName, fullPath: projectPath } = resolveProjectName(folder);
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
     let totalInput = 0, totalOutput = 0, totalCacheCreate = 0, totalCacheRead = 0;
-    let totalCost = 0, lastActive = null, sessionCount = 0, hasMatchingRecords = false;
+    let totalCost = 0, totalSavings = 0, lastActive = null, sessionCount = 0, hasMatchingRecords = false;
 
+    let lastWriteMs = 0;
     for (const jf of jsonlFiles) {
       let sessionHasMatch = false;
-      let sInput = 0, sOutput = 0, sCacheCreate = 0, sCacheRead = 0, sCost = 0;
-      const sModels = new Set();
-      try {
-        for (const line of fs.readFileSync(path.join(fullPath, jf), 'utf8').trim().split('\n')) {
-          if (!line) continue;
-          try {
-            const rec = JSON.parse(line);
-            if (rec.type === 'assistant' && rec.message?.usage) {
-              const dt = rec.timestamp ? new Date(rec.timestamp) : null;
-              if ((dtStart || dtEnd) && !dt) continue;
-              if (dt && dtStart && dt < dtStart) continue;
-              if (dt && dtEnd   && dt > dtEnd)   continue;
-              const model = rec.message.model || null;
-              const d = dedupe(rec);
-              sInput += d.input;
-              sOutput += d.output;
-              sCacheCreate += d.cacheCreate;
-              sCacheRead += d.cacheRead;
-              if (model && model !== '<synthetic>') sModels.add(model);
-              const day = dt ? localDay(dt) : null;
-              sCost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
-              sessionHasMatch = true;
-              hasMatchingRecords = true;
-              if (dt && (!lastActive || dt > lastActive)) lastActive = dt;
-            }
-          } catch {}
-        }
-      } catch {}
+      let sInput = 0, sOutput = 0, sCacheCreate = 0, sCacheRead = 0, sCost = 0, sSavings = 0;
+      const w = sessionLastWriteMs(fullPath, jf);
+      if (w > lastWriteMs) lastWriteMs = w;
+      const entry = getFileUsage(path.join(fullPath, jf));
+      for (const row of (entry ? entry.records : [])) {
+        const dt = row.ts != null ? new Date(row.ts) : null;
+        if ((dtStart || dtEnd) && !dt) continue;
+        if (dt && dtStart && dt < dtStart) continue;
+        if (dt && dtEnd   && dt > dtEnd)   continue;
+        const d = dedupe(row);
+        sInput += d.input;
+        sOutput += d.output;
+        sCacheCreate += d.cacheCreate;
+        sCacheRead += d.cacheRead;
+        const day = dt ? localDay(dt) : null;
+        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day);
+        sCost += bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
+        sSavings += bd.cacheReadSavings;
+        sessionHasMatch = true;
+        hasMatchingRecords = true;
+        if (dt && (!lastActive || dt > lastActive)) lastActive = dt;
+      }
       if (sessionHasMatch) {
         sessionCount++;
         totalInput += sInput;
@@ -152,6 +199,7 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
         totalCacheCreate += sCacheCreate;
         totalCacheRead += sCacheRead;
         totalCost += sCost;
+        totalSavings += sSavings;
       }
 
       if (includeSub) {
@@ -162,6 +210,7 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
             totalInput += s.input; totalOutput += s.output;
             totalCacheCreate += s.cacheCreate; totalCacheRead += s.cacheRead;
             totalCost += s.cost;
+            totalSavings += s.savings;
             hasMatchingRecords = true;
           }
         }
@@ -173,7 +222,8 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
         folder, name: displayName, fullPath: projectPath,
         sessionCount, totalInput, totalOutput, totalCacheCreate, totalCacheRead,
         totalTokens: totalInput + totalOutput + totalCacheCreate + totalCacheRead,
-        totalCost, lastActive: lastActive ? lastActive.toISOString() : null,
+        totalCost, totalSavings, lastActive: lastActive ? lastActive.toISOString() : null,
+        lastWriteMs,
       });
     }
   }
@@ -183,6 +233,25 @@ function listLocalProjects(startDate, endDate, includeSub = false) {
     if (!b.lastActive) return -1;
     return new Date(b.lastActive) - new Date(a.lastActive);
   });
+}
+
+// Most recent write across a session's main transcript and its subagent tree.
+// Drives the "Claude is working" indicator: file mtime captures every write
+// (tool results, progress, streaming) — usage-record timestamps don't, they
+// go stale mid-turn during long tool runs.
+function sessionLastWriteMs(dir, jf) {
+  let m = 0;
+  try { m = Math.round(fs.statSync(path.join(dir, jf)).mtimeMs); } catch {}
+  const subdir = path.join(dir, jf.replace('.jsonl', ''), 'subagents');
+  if (fs.existsSync(subdir)) {
+    for (const f of listAgentTranscripts(subdir)) {
+      try {
+        const mm = Math.round(fs.statSync(f).mtimeMs);
+        if (mm > m) m = mm;
+      } catch {}
+    }
+  }
+  return m;
 }
 
 function getProjectDetail(folder, startDate, endDate, includeSub = false) {
@@ -200,68 +269,59 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
   for (const jf of listSessionFilesOldestFirst(dir)) {
     const sessionId = jf.replace('.jsonl', '');
     let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
-    let firstTs = null, lastTs = null, title = null;
+    let firstTs = null, lastTs = null;
     let subagentCount = 0;
     const models = new Set();
     const modelUsage = {};
 
-    try {
-      for (const line of fs.readFileSync(path.join(dir, jf), 'utf8').trim().split('\n')) {
-        if (!line) continue;
-        try {
-          const rec = JSON.parse(line);
-          if (rec.type === 'ai-title' && rec.aiTitle) title = rec.aiTitle;
-          if (rec.type === 'assistant' && Array.isArray(rec.message?.content)) {
-            for (const b of rec.message.content) {
-              if (b.type === 'tool_use' && b.name === 'Agent' && (!b.id || !seenAgentSpawns.has(b.id))) {
-                if (b.id) seenAgentSpawns.add(b.id);
-                subagentCount++;
-              }
-            }
-          }
-          if (rec.type === 'assistant' && rec.message?.usage) {
-            const dt = rec.timestamp ? new Date(rec.timestamp) : null;
-            if ((dtStart || dtEnd) && !dt) continue;
-            if (dt && dtStart && dt < dtStart) continue;
-            if (dt && dtEnd   && dt > dtEnd)   continue;
-            const recModel = rec.message.model || null;
-            const d = dedupe(rec);
-            input       += d.input;
-            output      += d.output;
-            cacheCreate += d.cacheCreate;
-            cacheRead   += d.cacheRead;
-            const day = dt ? localDay(dt) : null;
-            const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day);
-            const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
-            cost += recCost;
-            if (recModel && recModel !== '<synthetic>') {
-              models.add(recModel);
-              if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0 };
-              const mu = modelUsage[recModel];
-              mu.input           += d.input;
-              mu.output          += d.output;
-              mu.cacheCreate     += d.cacheCreate;
-              mu.cacheRead       += d.cacheRead;
-              mu.inputCost       += bd.input;
-              mu.outputCost      += bd.output;
-              mu.cacheCreateCost += bd.cacheCreate;
-              mu.cacheReadCost   += bd.cacheRead;
-              mu.cost            += recCost;
-            }
-            if (dt) {
-              if (!firstTs || dt < firstTs) firstTs = dt;
-              if (!lastTs  || dt > lastTs)  lastTs  = dt;
-              if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
-              dailyMap[day].input       += d.input;
-              dailyMap[day].output      += d.output;
-              dailyMap[day].cacheCreate += d.cacheCreate;
-              dailyMap[day].cacheRead   += d.cacheRead;
-              dailyMap[day].cost        += recCost;
-            }
-          }
-        } catch {}
+    const entry = getFileUsage(path.join(dir, jf));
+    const title = entry ? entry.title : null;
+    for (const aid of (entry ? entry.agentSpawnIds : [])) {
+      if (!aid || !seenAgentSpawns.has(aid)) {
+        if (aid) seenAgentSpawns.add(aid);
+        subagentCount++;
       }
-    } catch {}
+    }
+    for (const row of (entry ? entry.records : [])) {
+      const dt = row.ts != null ? new Date(row.ts) : null;
+      if ((dtStart || dtEnd) && !dt) continue;
+      if (dt && dtStart && dt < dtStart) continue;
+      if (dt && dtEnd   && dt > dtEnd)   continue;
+      const recModel = row.model;
+      const d = dedupe(row);
+      input       += d.input;
+      output      += d.output;
+      cacheCreate += d.cacheCreate;
+      cacheRead   += d.cacheRead;
+      const day = dt ? localDay(dt) : null;
+      const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day);
+      const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
+      cost += recCost;
+      if (recModel && recModel !== '<synthetic>') {
+        models.add(recModel);
+        if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0 };
+        const mu = modelUsage[recModel];
+        mu.input           += d.input;
+        mu.output          += d.output;
+        mu.cacheCreate     += d.cacheCreate;
+        mu.cacheRead       += d.cacheRead;
+        mu.inputCost       += bd.input;
+        mu.outputCost      += bd.output;
+        mu.cacheCreateCost += bd.cacheCreate;
+        mu.cacheReadCost   += bd.cacheRead;
+        mu.cost            += recCost;
+      }
+      if (dt) {
+        if (!firstTs || dt < firstTs) firstTs = dt;
+        if (!lastTs  || dt > lastTs)  lastTs  = dt;
+        if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+        dailyMap[day].input       += d.input;
+        dailyMap[day].output      += d.output;
+        dailyMap[day].cacheCreate += d.cacheCreate;
+        dailyMap[day].cacheRead   += d.cacheRead;
+        dailyMap[day].cost        += recCost;
+      }
+    }
 
     if (includeSub) {
       const sub = getSessionSubagents(folder, sessionId);
@@ -293,6 +353,7 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
         modelUsage: Object.entries(modelUsage).map(([model, u]) => ({ model, ...u })),
         startedAt: firstTs ? firstTs.toISOString() : null,
         lastAt:    lastTs  ? lastTs.toISOString()  : null,
+        lastWriteMs: sessionLastWriteMs(dir, jf),
       });
     }
   }
@@ -318,23 +379,16 @@ function getTodayLocalSummary(includeSub = false) {
     if (!fs.statSync(fullPath).isDirectory()) continue;
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
     for (const jf of listSessionFilesOldestFirst(fullPath)) {
-      let sessionModel = null;
-      try {
-        for (const line of fs.readFileSync(path.join(fullPath, jf), 'utf8').trim().split('\n')) {
-          if (!line) continue;
-          try {
-            const rec = JSON.parse(line);
-            if (rec.type === 'assistant' && rec.message?.model && !sessionModel) sessionModel = rec.message.model;
-            if (rec.type === 'assistant' && rec.message?.usage && rec.timestamp) {
-              if (localDay(new Date(rec.timestamp)) === today) {
-                const d = dedupe(rec);
-                input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
-                cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, rec.message.model || sessionModel, today);
-              }
-            }
-          } catch {}
-        }
-      } catch {}
+      const entry = getFileUsage(path.join(fullPath, jf));
+      const rows = entry ? entry.records : [];
+      const sessionModel = (rows.find(r => r.model) || {}).model || null;
+      for (const row of rows) {
+        if (row.ts == null) continue;
+        if (localDay(new Date(row.ts)) !== today) continue;
+        const d = dedupe(row);
+        input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
+        cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, today);
+      }
 
       if (includeSub) {
         const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
@@ -639,7 +693,8 @@ function getSessionSubagents(folder, sessionId) {
 
   const byName = {};
   const totals = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0 };
-  const daily = {}; // day -> { input, output, cacheCreate, cacheRead, cost }
+  const daily = {}; // day -> { input, output, cacheCreate, cacheRead, cost, savings, costByModel }
+  const records = []; // post-dedupe { ts, input, output, cacheCreate, cacheRead, cost } for rate windows
   let agentCount = 0;
 
   const newAcc = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
@@ -679,8 +734,17 @@ function getSessionSubagents(folder, sessionId) {
             }
           }
           if (rec.message?.usage) {
-            const day = rec.timestamp ? localDay(new Date(rec.timestamp)) : null;
-            const d = dedupe(rec);
+            const u = rec.message.usage;
+            const ts = rec.timestamp ? Date.parse(rec.timestamp) : null;
+            const day = ts != null ? localDay(new Date(ts)) : null;
+            const d = dedupe({
+              id: rec.message.id || null,
+              requestId: rec.requestId || null,
+              input: u.input_tokens || 0,
+              output: u.output_tokens || 0,
+              cacheCreate: u.cache_creation_input_tokens || 0,
+              cacheRead: u.cache_read_input_tokens || 0,
+            });
             const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             const e = ensure(mk);
@@ -689,11 +753,15 @@ function getSessionSubagents(folder, sessionId) {
             e.inputCost += bd.input; e.outputCost += bd.output;
             e.cacheCreateCost += bd.cacheCreate; e.cacheReadCost += bd.cacheRead;
             if (d.first) e.turns++;
+            if (ts != null) records.push({ ts, input: d.input, output: d.output, cacheCreate: d.cacheCreate, cacheRead: d.cacheRead, cost: recCost });
             if (day) {
-              if (!daily[day]) daily[day] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+              if (!daily[day]) daily[day] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, costByModel: {} };
               daily[day].input += d.input; daily[day].output += d.output;
               daily[day].cacheCreate += d.cacheCreate; daily[day].cacheRead += d.cacheRead;
               daily[day].cost += recCost;
+              daily[day].savings += bd.cacheReadSavings;
+              const fam = modelFamily(model);
+              daily[day].costByModel[fam] = (daily[day].costByModel[fam] || 0) + recCost;
             }
           }
         } catch {}
@@ -745,16 +813,22 @@ function getSessionSubagents(folder, sessionId) {
     .map(g => ({ ...g, models: [g.model] }))
     .sort((a, b) => b.cost - a.cost || b.total - a.total);
 
-  const result = { agentCount, agents, totals: agentCount ? totals : null, daily };
+  const result = { agentCount, agents, totals: agentCount ? totals : null, daily, records };
   _subagentCache.set(cacheKey, { sig, result });
   return result;
+}
+
+// Drop caches that bake in computed costs (the file cache only holds raw token
+// rows, so it survives a price change untouched).
+function clearCostCaches() {
+  _subagentCache.clear();
 }
 
 // Sum a subagent daily-breakdown map over an optional [dtStart, dtEnd] window.
 // Day-granular (subagent records are bucketed by calendar day); date filters are
 // day-aligned so this matches the main-thread per-record filtering closely enough.
 function sumSubagentRange(daily, dtStart, dtEnd) {
-  const acc = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+  const acc = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0 };
   if (!daily) return acc;
   for (const [day, v] of Object.entries(daily)) {
     if (dtStart || dtEnd) {
@@ -765,6 +839,7 @@ function sumSubagentRange(daily, dtStart, dtEnd) {
     acc.input += v.input; acc.output += v.output;
     acc.cacheCreate += v.cacheCreate; acc.cacheRead += v.cacheRead;
     acc.cost += v.cost;
+    acc.savings += v.savings || 0;
   }
   return acc;
 }
@@ -802,6 +877,84 @@ function reorderToolResults(messages) {
   }
   for (const m of out) delete m.__key;
   return out;
+}
+
+// ── Rate-limit windows ────────────────────────────────────────────────────────
+// Anthropic's subscription limits meter 5-hour session windows: a window opens
+// with the first message and expires 5 hours later; the next message after
+// expiry opens a new one. Reconstructed here from record timestamps across ALL
+// projects (main threads + subagents, post-dedupe). Window starts are floored
+// to the hour — community convention; exact anchoring is not officially
+// documented. Token counts are exact; how Anthropic weighs them against the
+// quota is not public, so no percentage is computed here.
+function getRateWindows(includeSub = true) {
+  const WIN_MS = 5 * 3600 * 1000;
+  const dir = getClaudeProjectsDir();
+  const empty = { current: null, week: { total: 0, cost: 0 }, avgWindowTotal: 0, windowCount: 0, now: Date.now() };
+  if (!fs.existsSync(dir)) return empty;
+
+  const events = []; // { ts, input, output, cacheCreate, cacheRead, cost }
+  for (const folder of fs.readdirSync(dir)) {
+    const fullPath = path.join(dir, folder);
+    try { if (!fs.statSync(fullPath).isDirectory()) continue; } catch { continue; }
+    const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
+    for (const jf of listSessionFilesOldestFirst(fullPath)) {
+      const entry = getFileUsage(path.join(fullPath, jf));
+      const rows = entry ? entry.records : [];
+      const sessionModel = (rows.find(r => r.model) || {}).model || null;
+      for (const row of rows) {
+        const d = dedupe(row);
+        if (row.ts == null) continue;
+        const total = d.input + d.output + d.cacheCreate + d.cacheRead;
+        if (!total) continue;
+        const day = localDay(new Date(row.ts));
+        events.push({
+          ts: row.ts, input: d.input, output: d.output, cacheCreate: d.cacheCreate, cacheRead: d.cacheRead,
+          cost: calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, day),
+        });
+      }
+      if (includeSub) {
+        const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
+        for (const r of (sub.records || [])) {
+          if (r.input + r.output + r.cacheCreate + r.cacheRead) events.push(r);
+        }
+      }
+    }
+  }
+  if (!events.length) return empty;
+  events.sort((a, b) => a.ts - b.ts);
+
+  const windows = [];
+  let cur = null;
+  for (const e of events) {
+    if (!cur || e.ts >= cur.end) {
+      const start = Math.floor(e.ts / 3600000) * 3600000;
+      cur = { start, end: start + WIN_MS, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0 };
+      windows.push(cur);
+    }
+    cur.input += e.input; cur.output += e.output;
+    cur.cacheCreate += e.cacheCreate; cur.cacheRead += e.cacheRead;
+    cur.total += e.input + e.output + e.cacheCreate + e.cacheRead;
+    cur.cost += e.cost;
+  }
+
+  const now = Date.now();
+  const last = windows[windows.length - 1];
+  const current = now < last.end ? last : null;
+
+  const weekStart = now - 7 * 86400000;
+  const week = { total: 0, cost: 0 };
+  for (const e of events) {
+    if (e.ts >= weekStart) { week.total += e.input + e.output + e.cacheCreate + e.cacheRead; week.cost += e.cost; }
+  }
+
+  // Typical pace: average of the last 20 completed windows.
+  const completed = windows.filter(w => w !== current).slice(-20);
+  const avgWindowTotal = completed.length
+    ? Math.round(completed.reduce((a, w) => a + w.total, 0) / completed.length)
+    : 0;
+
+  return { current, week, avgWindowTotal, windowCount: windows.length, now };
 }
 
 function searchSessions(folder, query) {
@@ -859,40 +1012,34 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
     let pInput = 0, pOutput = 0, pCacheCreate = 0, pCacheRead = 0, pCost = 0;
 
+    const ensureDay = (day) => dailyMap[day] || (dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, costByModel: {} });
+
     for (const jf of jsonlFiles) {
-      try {
-        for (const line of fs.readFileSync(path.join(fullPath, jf), 'utf8').trim().split('\n')) {
-          if (!line) continue;
-          try {
-            const rec = JSON.parse(line);
-            if (rec.type === 'assistant' && rec.message?.usage) {
-              const dt = rec.timestamp ? new Date(rec.timestamp) : null;
-              if ((dtStart || dtEnd) && !dt) continue;
-              if (dt && dtStart && dt < dtStart) continue;
-              if (dt && dtEnd   && dt > dtEnd)   continue;
-              const model = rec.message.model || null;
-              const d = dedupe(rec);
-              const iT = d.input;
-              const oT = d.output;
-              const ccT = d.cacheCreate;
-              const crT = d.cacheRead;
-              const day = dt ? localDay(dt) : null;
-              const cost = calcCost(iT, oT, ccT, crT, model, day);
+      const entry = getFileUsage(path.join(fullPath, jf));
+      for (const row of (entry ? entry.records : [])) {
+        const dt = row.ts != null ? new Date(row.ts) : null;
+        if ((dtStart || dtEnd) && !dt) continue;
+        if (dt && dtStart && dt < dtStart) continue;
+        if (dt && dtEnd   && dt > dtEnd)   continue;
+        const d = dedupe(row);
+        const day = dt ? localDay(dt) : null;
+        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day);
+        const cost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
 
-              pInput += iT; pOutput += oT; pCacheCreate += ccT; pCacheRead += crT; pCost += cost;
+        pInput += d.input; pOutput += d.output; pCacheCreate += d.cacheCreate; pCacheRead += d.cacheRead; pCost += cost;
 
-              if (dt) {
-                if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
-                dailyMap[day].input       += iT;
-                dailyMap[day].output      += oT;
-                dailyMap[day].cacheCreate += ccT;
-                dailyMap[day].cacheRead   += crT;
-                dailyMap[day].cost        += cost;
-              }
-            }
-          } catch {}
+        if (dt) {
+          const dm = ensureDay(day);
+          dm.input       += d.input;
+          dm.output      += d.output;
+          dm.cacheCreate += d.cacheCreate;
+          dm.cacheRead   += d.cacheRead;
+          dm.cost        += cost;
+          dm.savings     += bd.cacheReadSavings;
+          const fam = modelFamily(row.model);
+          dm.costByModel[fam] = (dm.costByModel[fam] || 0) + cost;
         }
-      } catch {}
+      }
 
       if (includeSub) {
         const sub = getSessionSubagents(folder, jf.replace('.jsonl', ''));
@@ -904,10 +1051,14 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
               if (dtEnd && d > dtEnd) continue;
             }
             pInput += v.input; pOutput += v.output; pCacheCreate += v.cacheCreate; pCacheRead += v.cacheRead; pCost += v.cost;
-            if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
-            dailyMap[day].input += v.input; dailyMap[day].output += v.output;
-            dailyMap[day].cacheCreate += v.cacheCreate; dailyMap[day].cacheRead += v.cacheRead;
-            dailyMap[day].cost += v.cost;
+            const dm = ensureDay(day);
+            dm.input += v.input; dm.output += v.output;
+            dm.cacheCreate += v.cacheCreate; dm.cacheRead += v.cacheRead;
+            dm.cost += v.cost;
+            dm.savings += v.savings || 0;
+            for (const [fam, c] of Object.entries(v.costByModel || {})) {
+              dm.costByModel[fam] = (dm.costByModel[fam] || 0) + c;
+            }
           }
         }
       }
@@ -925,4 +1076,4 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
   return { dailyTotals, projectTotals };
 }
 
-module.exports = { listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals };
+module.exports = { getClaudeProjectsDir, listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches };

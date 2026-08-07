@@ -1,6 +1,9 @@
 import { escapeHtml, highlightText, formatNum } from './utils.js';
 
 let chatMessages = [];
+let chatSessionId = null;
+let searchMarks = [];
+let searchIndex = -1;
 
 // Pretty-print a string that is entirely a JSON object/array; else return it unchanged.
 function prettyJson(str) {
@@ -318,6 +321,7 @@ function renderChatMessages(messages, highlight) {
 export async function openSessionChat(folder, sessionId) {
   const messages = await window.api.getSessionChat(folder, sessionId);
   chatMessages = messages;
+  chatSessionId = sessionId;
   const overlay = document.getElementById('chat-overlay');
   const body = document.getElementById('chat-body');
   const searchInput = document.getElementById('chat-search');
@@ -325,6 +329,10 @@ export async function openSessionChat(folder, sessionId) {
 
   searchInput.value = '';
   countEl.textContent = '';
+  searchMarks = [];
+  searchIndex = -1;
+  document.getElementById('btn-search-prev').classList.add('hidden');
+  document.getElementById('btn-search-next').classList.add('hidden');
   body.innerHTML = messages.length === 0
     ? '<div class="empty-state">No messages found</div>'
     : renderChatMessages(messages);
@@ -340,23 +348,111 @@ export async function openSessionChat(folder, sessionId) {
   });
 }
 
-export function initChatViewer() {
-  document.getElementById('chat-search').addEventListener('input', (e) => {
-    const q = e.target.value.trim();
-    const body = document.getElementById('chat-body');
-    const countEl = document.getElementById('chat-search-count');
+// ── Markdown export ───────────────────────────────────────────────────────────
 
-    if (!q) {
-      body.innerHTML = renderChatMessages(chatMessages);
-      countEl.textContent = '';
-      return;
+// Fence that cannot collide with fences inside the content.
+function fence(text) {
+  const ticks = (text.match(/`{3,}/g) || []).reduce((m, t) => Math.max(m, t.length), 2);
+  return '`'.repeat(ticks + 1);
+}
+
+function chatToMarkdown(messages) {
+  const lines = [`# Session ${chatSessionId || ''}`, ''];
+  for (const m of messages) {
+    const time = m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+    const who = m.isCompactSummary ? 'Compacted Summary'
+      : m.role === 'attachment' ? 'Context'
+      : m.role === 'user' ? 'You'
+      : m.role === 'tool' ? 'Tool Result'
+      : `Claude${m.model ? ` (${m.model})` : ''}`;
+    lines.push(`### ${who}${time ? ` — ${time}` : ''}`, '');
+    for (const p of m.parts) {
+      if (p.type === 'text') {
+        lines.push(p.text.trim(), '');
+      } else if (p.type === 'tool_use') {
+        const f = fence(p.input);
+        lines.push(`**Tool: ${p.tool}**`, '', f, p.input, f, '');
+      } else if (p.type === 'tool_result') {
+        const f = fence(p.content);
+        lines.push(`**Result${p.isError ? ' (error)' : ''}**`, '', f, p.content, f, '');
+      } else if (p.type === 'attachment') {
+        if (p.displayPath) lines.push(`> ${p.kind}: ${p.displayPath}`, '');
+        else if (p.text) lines.push(`> ${p.label || p.kind}: ${p.text}`, '');
+        else lines.push(`> ${p.label || p.attachType || p.kind}`, '');
+      } else if (p.type === 'image') {
+        lines.push('*(image attached)*', '');
+      }
     }
+  }
+  return lines.join('\n');
+}
 
-    body.innerHTML = renderChatMessages(chatMessages, q);
-    const marks = body.querySelectorAll('.chat-highlight');
-    countEl.textContent = marks.length ? `${marks.length} found` : 'No matches';
-    if (marks.length) marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+// ── Search navigation ─────────────────────────────────────────────────────────
+
+function updateSearchCount() {
+  const countEl = document.getElementById('chat-search-count');
+  const prevBtn = document.getElementById('btn-search-prev');
+  const nextBtn = document.getElementById('btn-search-next');
+  const hasNav = searchMarks.length > 1;
+  prevBtn.classList.toggle('hidden', !hasNav);
+  nextBtn.classList.toggle('hidden', !hasNav);
+  if (!searchMarks.length) {
+    countEl.textContent = 'No matches';
+    return;
+  }
+  countEl.textContent = `${searchIndex + 1}/${searchMarks.length}`;
+}
+
+function gotoMatch(idx) {
+  if (!searchMarks.length) return;
+  // Wrap around at both ends.
+  const n = searchMarks.length;
+  searchIndex = ((idx % n) + n) % n;
+  searchMarks.forEach((m, i) => m.classList.toggle('active', i === searchIndex));
+  searchMarks[searchIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  updateSearchCount();
+}
+
+function runChatSearch(q) {
+  const body = document.getElementById('chat-body');
+  const countEl = document.getElementById('chat-search-count');
+
+  if (!q) {
+    body.innerHTML = renderChatMessages(chatMessages);
+    countEl.textContent = '';
+    searchMarks = [];
+    searchIndex = -1;
+    document.getElementById('btn-search-prev').classList.add('hidden');
+    document.getElementById('btn-search-next').classList.add('hidden');
+    return;
+  }
+
+  body.innerHTML = renderChatMessages(chatMessages, q);
+  searchMarks = Array.from(body.querySelectorAll('.chat-highlight'));
+  searchIndex = -1;
+  if (searchMarks.length) {
+    gotoMatch(0);
+  } else {
+    updateSearchCount();
+  }
+}
+
+export function initChatViewer() {
+  document.getElementById('btn-export-chat').addEventListener('click', () => {
+    if (!chatMessages.length) return;
+    const name = `chat-${(chatSessionId || 'session').substring(0, 8)}.md`;
+    window.api.exportFile(name, chatToMarkdown(chatMessages));
   });
+
+  const searchInput = document.getElementById('chat-search');
+  searchInput.addEventListener('input', (e) => runChatSearch(e.target.value.trim()));
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    gotoMatch(searchIndex + (e.shiftKey ? -1 : 1));
+  });
+  document.getElementById('btn-search-prev').addEventListener('click', () => gotoMatch(searchIndex - 1));
+  document.getElementById('btn-search-next').addEventListener('click', () => gotoMatch(searchIndex + 1));
 
   document.getElementById('btn-close-chat').addEventListener('click', () => {
     document.getElementById('chat-overlay').classList.add('hidden');

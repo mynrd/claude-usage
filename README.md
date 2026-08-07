@@ -10,6 +10,24 @@ A desktop application that tracks local token consumption from Claude Code sessi
 
 ## Features
 
+### Rate-Limit Window Tracking
+- Reconstructs Anthropic's **5-hour session windows** from transcript timestamps across all projects (main threads + subagents, deduped): current window start/end, exact token burn, cost, and burn rate (tokens/hr)
+- **Pace badge** — current window vs your average completed window (e.g. `4.1× avg`)
+- **Rolling 7-day** token/cost total alongside
+- Optional **Limit** field (your own per-window estimate, in M tokens — Anthropic doesn't publish plan quotas): shows a % gauge and a projected time you'd hit it at the current pace
+- Shown as a bar on the Local tab and a section in Widget mode
+- Token counts are exact; window anchoring (floored to the hour) follows community convention since Anthropic doesn't document it
+
+### Live Refresh
+- Watches `~/.claude/projects` and auto-refreshes the active tab, widget, and tray tooltip when transcripts change (debounced; paused while you're typing in a field or viewing a chat)
+- **New conversations appear in the session list automatically** as Claude Code creates them — no manual refresh
+- **Live indicator** — a pulsing green dot on session rows and project entries where Claude is actively working, driven by transcript file writes (main + subagent transcripts, last write within ~45 s); dots dim on their own once writes stop. A long-running tool that produces no output yet can briefly dim the dot — transcripts carry no end-of-turn marker, so write recency is the best available signal
+- No Claude Code hooks or configuration required — the app reads the transcript files directly
+- Backed by a per-file parse cache keyed by size+mtime — refreshes re-read only files that actually changed
+
+### Cache Savings
+- **Cache Saved** cards on the Local tab and Analytics: what the cache-read tokens would have cost extra at the full input rate
+
 ### Tab 1 — Local Usage
 - Parses Claude Code session data from `~/.claude/projects/`
 - Lists all projects with total token counts, estimated cost, session counts, and last active date
@@ -26,9 +44,13 @@ A desktop application that tracks local token consumption from Claude Code sessi
 ### Tab 2 — Analytics
 - Cross-project analytics with date range filtering and the same **Include subagents** toggle
 - **Daily Token Usage** — stacked bar chart across all projects
-- **Daily Cost** — cost trend over time
+- **Daily Cost** — stacked bar chart split by model family (opus / sonnet / haiku / …)
 - **Token Type Breakdown** — doughnut chart of input/output/cache distribution
 - **Top Projects by Usage** — bar chart of heaviest consumers
+
+### Export
+- **CSV** — session rows and daily totals per project (Local tab), and cross-project daily totals (Analytics)
+- **Markdown** — export any conversation from the chat viewer
 
 ### Subagent & Agent Team Tracking
 - Subagent/team transcripts live in `<sessionId>/subagents/agent-*.jsonl` (Workflow runs nest one level deeper under `subagents/workflows/<wf-id>/`); the whole tree is parsed
@@ -77,6 +99,7 @@ A desktop application that tracks local token consumption from Claude Code sessi
 
 ### System Tray
 - App minimizes to system tray on close instead of quitting
+- Tray tooltip shows today's tokens and cost, kept current by the file watcher
 - Right-click menu: Show, Widget Mode, Quit
 - Double-click tray icon to restore window
 - Single-instance lock — launching a second copy focuses the existing window
@@ -91,6 +114,10 @@ A desktop application that tracks local token consumption from Claude Code sessi
 npm install
 npm start
 ```
+
+That's the whole installation. The app only **reads** `~/.claude/projects/` — it needs no
+Claude Code hooks, plugins, or settings changes, and it never modifies your transcripts.
+Live refresh works out of the box via a file watcher on that folder.
 
 ## Verify Counting
 
@@ -143,6 +170,16 @@ After a successful build, the output is in the `dist/` folder:
 ## Updating Model Pricing
 
 Anthropic occasionally changes model prices. Since there is no official pricing API, rates are stored locally in `price-history.json`.
+
+### In-app editor (recommended)
+
+Click **$ Pricing** in the header. The dialog shows the latest snapshot's rates in an
+editable table ($ / MTok) — edit values, add new models, remove stale ones, then
+**Save as today's snapshot**. This appends a snapshot dated today to the **live**
+`price-history.json` (saving again the same day replaces today's snapshot), recalculates
+costs immediately, and never touches historical rates. No restart needed.
+
+The manual file-editing path below still works if you prefer it.
 
 ### How it works
 
@@ -218,6 +255,7 @@ Claude Usage/
 │   ├── vendor/
 │   │   └── chart.umd.min.js  Bundled Chart.js
 │   ├── modules/
+│   │   ├── pricing-settings.js  In-app model pricing editor ($ Pricing)
 │   │   ├── local-tab.js     Local usage tab + usage detail modal
 │   │   ├── analytics-tab.js Analytics tab
 │   │   ├── chat-viewer.js   Chat history overlay
@@ -232,7 +270,8 @@ Claude Usage/
 │       ├── projects.js       JSONL parsing, dedupe, subagent aggregation, chat extraction
 │       ├── pricing.js        Cost calculation (main process)
 │       ├── price-history.js  Historical pricing lookup
-│       ├── tray.js           System tray
+│       ├── watcher.js        ~/.claude/projects file watcher (live refresh)
+│       ├── tray.js           System tray + tooltip
 │       └── window.js         BrowserWindow management
 └── README.md
 ```

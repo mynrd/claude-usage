@@ -11,6 +11,7 @@
   <header class="header">
     <h1 class="header-title">Claude Usage</h1>
     <div class="header-actions">
+      <button id="btn-pricing" class="btn" title="Edit model pricing">$ Pricing</button>
       <button id="btn-widget-mode" class="btn btn-accent">Widget Mode</button>
       <button id="btn-theme" class="btn-theme" title="Toggle dark mode">&#9790;</button>
     </div>
@@ -20,6 +21,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="local">Local Usage</button>
     <button class="tab" data-tab="analytics">Analytics</button>
+    <button class="tab" data-tab="stats">Stats</button>
   </nav>
 
   <!-- Tab 1: Local Usage -->
@@ -39,6 +41,10 @@
     </div>
 
     <div class="local-summary" id="local-summary"></div>
+
+    <div class="rate-window-bar" id="rate-window-bar"></div>
+
+    <div class="cli-usage-bar" id="cli-usage-bar"></div>
 
     <div class="local-layout">
       <div class="project-list-panel">
@@ -62,6 +68,7 @@
       </label>
       <button id="btn-refresh-analytics" class="btn btn-small">&#8635; Refresh</button>
       <button id="btn-clear-analytics-dates" class="btn btn-small">Clear</button>
+      <button id="btn-export-analytics" class="btn btn-small" title="Export daily totals as CSV">Export CSV</button>
       <label class="subagent-toggle" title="Fold subagent / agent-team token spend into all totals">
         <input type="checkbox" id="toggle-subagents-analytics" /> Include subagents
       </label>
@@ -89,6 +96,31 @@
     </div>
   </div>
 
+  <!-- Tab 3: Stats (mirrors `claude /usage` → Stats) -->
+  <div id="tab-stats" class="tab-content">
+    <div class="stats-toolbar">
+      <div class="stats-subtabs">
+        <button class="stats-subtab active" data-stab="overview">Overview</button>
+        <button class="stats-subtab" data-stab="models">Models</button>
+      </div>
+      <div class="stats-range" id="stats-range">
+        <button class="stats-range-btn active" data-range="all">All time</button>
+        <button class="stats-range-btn" data-range="30">Last 30 days</button>
+        <button class="stats-range-btn" data-range="7">Last 7 days</button>
+      </div>
+      <button id="stats-date-btn" class="btn btn-small stats-date-btn" title="Show a single day">
+        <span class="stats-date-cal">&#128197;</span>
+        <span id="stats-date-label">Pick a day</span>
+        <span id="stats-date-clear" class="stats-date-clear" title="Clear">&times;</span>
+        <input type="date" id="stats-date" class="stats-date-native">
+      </button>
+      <button id="btn-refresh-stats" class="btn btn-small">&#8635; Refresh</button>
+    </div>
+
+    <div class="stats-panel active" id="stats-overview"></div>
+    <div class="stats-panel" id="stats-models"></div>
+  </div>
+
   <!-- Widget View -->
   <div id="widget-view" class="widget-view">
     <div class="widget-view-header">
@@ -102,6 +134,10 @@
       <h3>Today's Local Usage</h3>
       <div id="widget-local"></div>
     </div>
+    <div class="widget-section">
+      <h3>Current 5-Hour Window</h3>
+      <div id="widget-window"></div>
+    </div>
   </div>
 
   <!-- Chat Viewer Overlay -->
@@ -112,7 +148,10 @@
         <div class="chat-search-bar">
           <input type="text" id="chat-search" class="search-input" placeholder="Search in chat..." />
           <span id="chat-search-count" class="search-count"></span>
+          <button id="btn-search-prev" class="btn btn-icon search-nav hidden" title="Previous match (Shift+Enter)">&#8593;</button>
+          <button id="btn-search-next" class="btn btn-icon search-nav hidden" title="Next match (Enter)">&#8595;</button>
         </div>
+        <button id="btn-export-chat" class="btn btn-small" title="Export conversation as Markdown">Export MD</button>
         <button id="btn-close-chat" class="btn btn-icon">&times;</button>
       </div>
       <div class="chat-body" id="chat-body"></div>

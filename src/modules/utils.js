@@ -51,6 +51,16 @@ export function filterHistory(records, mode) {
   return records.filter(r => new Date(r.ts) >= cutoff);
 }
 
+// rows: array of arrays (first row = header). Quotes fields containing
+// commas, quotes, or newlines per RFC 4180.
+export function toCsv(rows) {
+  const field = (v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return rows.map(r => r.map(field).join(',')).join('\r\n') + '\r\n';
+}
+
 export function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
