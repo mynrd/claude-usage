@@ -63,7 +63,7 @@ A desktop application that tracks local token consumption from Claude Code sessi
 - **Streamed-row dedupe** — Claude Code writes the JSONL during streaming, so one API response appears as several lines each carrying a copy of the usage object; raw sums overcount 2–20×. Every counting path dedupes by `message.id + requestId`, counting each usage category once at the highest value observed.
 - **Resumed/branched sessions** — dedup is folder-scoped and files are scanned oldest-first, so a resumed session's copied history isn't double-counted; the copy contributes only its new turns.
 - Shared agent-team turns and repeated tool_use blocks are likewise deduped across all of a session's agent files.
-- `scripts/verify-usage.py` is an independent Python reference implementation; `node scripts/verify-usage-app.js` checks the app's counting paths against its snapshotted targets and cross-path invariants (session rows ⇔ folder totals ⇔ daily totals).
+- `scripts/verify-usage.py` is an independent Python reference implementation that recomputes raw vs deduped totals straight from the JSONL, so the app's numbers can be checked against it.
 
 ### Chat History Viewer
 - Full chat viewer overlay for any session
@@ -122,13 +122,13 @@ Live refresh works out of the box via a file watcher on that folder.
 ## Verify Counting
 
 ```bash
-node scripts/verify-usage-app.js
+python scripts/verify-usage.py <folder> [sessionId ...]
 ```
 
-Runs the app's counting paths (under plain Node, with Electron shimmed) against
-point-in-time targets produced by `scripts/verify-usage.py`. The targets are
-snapshots of live transcript folders — if a check fails, re-run the Python
-reference first to distinguish a code bug from folder drift.
+`<folder>` is the encoded project folder name under `~/.claude/projects`. The
+script shares no code with the app: it reads the transcript JSONL directly and
+prints raw vs deduped totals as JSON, so the app's numbers can be compared
+against an independent implementation.
 
 ## Build Distributable
 
@@ -246,8 +246,7 @@ Claude Usage/
 ├── assets/              App + tray icons
 ├── price-history.json   Historical model pricing snapshots (edit to update rates)
 ├── scripts/
-│   ├── verify-usage.py      Independent reference counter (produces targets)
-│   └── verify-usage-app.js  Checks app counting paths against the targets
+│   └── verify-usage.py      Independent reference counter (raw vs deduped)
 ├── src/
 │   ├── index.html       UI layout (tabs, widget, chat overlay, lightbox)
 │   ├── styles.css       Styling (light & dark themes)
