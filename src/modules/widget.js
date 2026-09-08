@@ -18,7 +18,8 @@ export async function refreshWidget() {
         Input: <strong>${formatNum(today.input)}</strong> &middot;
         Output: <strong>${formatNum(today.output)}</strong> &middot;
         Cache: <strong>${formatNum((today.cacheCreate || 0) + (today.cacheRead || 0))}</strong><br>
-        Total today: <strong>${formatNum(today.total)}</strong> tokens &middot; <span class="cost-total">${formatCost(todayCost)}</span>
+        Total today: <strong>${formatNum(today.total)}</strong> tokens &middot; <span class="cost-total">${formatCost(todayCost)}</span>${
+          typeof today.messages === 'number' ? ` &middot; Messages: <strong>${formatNum(today.messages)}</strong>` : ''}
       </div>
     `;
   } catch {

@@ -1,4 +1,4 @@
-import { formatNum, toCsv } from './utils.js';
+import { formatNum, escapeHtml } from './utils.js';
 import { formatCost } from './pricing.js';
 import { getIncludeSubagents, setIncludeSubagents } from './settings.js';
 
@@ -6,7 +6,10 @@ let chartDailyTokens  = null;
 let chartDailyCost    = null;
 let chartBreakdown    = null;
 let chartTopProjects  = null;
+let chartMessages     = null;
 let lastDailyTotals   = [];
+let lastProjectTotals = [];
+let messagesPeriod    = 'day';   // 'day' | 'week' - the Day/Week toggle on the messages card
 
 function getDateRange() {
   return {
@@ -28,13 +31,15 @@ export async function loadAnalytics() {
 
   const { from, to } = getDateRange();
   const data = await window.api.getAnalyticsData(from, to, getIncludeSubagents());
-  lastDailyTotals = data.dailyTotals;
+  lastDailyTotals   = data.dailyTotals;
+  lastProjectTotals = data.projectTotals;
 
   renderSummary(data);
   renderDailyTokensChart(data.dailyTotals);
   renderDailyCostChart(data.dailyTotals);
   renderBreakdownChart(data.dailyTotals);
   renderTopProjectsChart(data.projectTotals);
+  renderMessagesChart(data.dailyTotals);
 }
 
 // ── Summary strip ─────────────────────────────────────────────────────────────
@@ -48,9 +53,10 @@ function renderSummary(data) {
       acc.cacheRead   += d.cacheRead;
       acc.cost        += d.cost;
       acc.savings     += d.savings || 0;
+      acc.messages    += d.messages || 0;
       return acc;
     },
-    { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0 }
+    { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, messages: 0 }
   );
   const totalTokens = totals.input + totals.output + totals.cacheCreate + totals.cacheRead;
   const days = data.dailyTotals.length;
@@ -77,6 +83,10 @@ function renderSummary(data) {
     <div class="summary-stat" title="What the cache-read tokens would have cost extra at the full input rate">
       <div class="stat-value stat-savings">${formatCost(totals.savings)}</div>
       <div class="stat-label">Cache Saved</div>
+    </div>
+    <div class="summary-stat" title="Prompts you typed">
+      <div class="stat-value">${formatNum(totals.messages)}</div>
+      <div class="stat-label">Messages</div>
     </div>
     <div class="summary-stat">
       <div class="stat-value">${days}</div>
@@ -105,8 +115,8 @@ function chartDefaults() {
 }
 
 function destroyAll() {
-  [chartDailyTokens, chartDailyCost, chartBreakdown, chartTopProjects].forEach(c => c && c.destroy());
-  chartDailyTokens = chartDailyCost = chartBreakdown = chartTopProjects = null;
+  [chartDailyTokens, chartDailyCost, chartBreakdown, chartTopProjects, chartMessages].forEach(c => c && c.destroy());
+  chartDailyTokens = chartDailyCost = chartBreakdown = chartTopProjects = chartMessages = null;
 }
 
 // ── Chart 1: Daily Token Usage (stacked bar) ──────────────────────────────────
@@ -283,9 +293,220 @@ function renderTopProjectsChart(projectTotals) {
   });
 }
 
+// ── Chart 5: Messages per Day / Week (stacked bar by model) ──────────────────
+// "Messages" = prompts the user typed. `messagesByModel` is keyed by full model
+// id plus 'no-reply' for prompts that never got an assistant reply.
+
+function shortModel(m) {
+  if (m === 'no-reply') return 'No reply';
+  const match = m.match(/(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/i);
+  if (!match) return m;
+  const name = match[1][0].toUpperCase() + match[1].slice(1);
+  const minor = match[3] ? `.${match[3]}` : '';
+  return `${name} ${match[2]}${minor}`;
+}
+
+function familyOf(m) {
+  const match = (m || '').match(/fable|mythos|opus|sonnet|haiku/i);
+  return match ? match[0].toLowerCase() : 'other';
+}
+
+// Monday-start week containing `date` (YYYY-MM-DD), as a local Date at noon
+// so DST shifts cannot move it across midnight.
+function weekStart(date) {
+  const d = new Date(date + 'T12:00:00');
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+
+// Groups dailyTotals into periods. Returns ordered buckets (oldest first) and
+// the model keys seen across the range, ordered by total desc.
+function messageBuckets(dailyTotals, period) {
+  const byKey = new Map();
+  const modelTotals = {};
+  for (const d of dailyTotals) {
+    let key = d.date, label = d.date;
+    if (period === 'week') {
+      const ws = weekStart(d.date);
+      key = ws.toLocaleDateString('en-CA');
+      label = `Wk of ${ws.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+    }
+    let b = byKey.get(key);
+    if (!b) { b = { key, label, total: 0, byModel: {} }; byKey.set(key, b); }
+    b.total += d.messages || 0;
+    for (const [m, n] of Object.entries(d.messagesByModel || {})) {
+      b.byModel[m] = (b.byModel[m] || 0) + n;
+      modelTotals[m] = (modelTotals[m] || 0) + n;
+    }
+  }
+  const buckets = [...byKey.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const models = Object.keys(modelTotals).sort((a, b) => modelTotals[b] - modelTotals[a]);
+  return { buckets, models };
+}
+
+function renderMessagesChart(dailyTotals) {
+  const ctx = document.getElementById('chart-messages');
+  if (!ctx) return;
+  if (chartMessages) { chartMessages.destroy(); chartMessages = null; }
+
+  const c = chartDefaults();
+  const { buckets, models } = messageBuckets(dailyTotals, messagesPeriod);
+  const noData = buckets.length === 0;
+
+  chartMessages = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: noData ? ['No data'] : buckets.map(b => b.label),
+      datasets: noData ? [] : models.map(m => ({
+        label: shortModel(m),
+        data: buckets.map(b => b.byModel[m] || 0),
+        backgroundColor: FAMILY_COLORS[familyOf(m)] || FAMILY_COLORS.other,
+        stack: 'messages',
+      })),
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { boxWidth: 10, font: { size: 10 }, color: c.textColor } },
+        tooltip: {
+          callbacks: {
+            label: item => ` ${item.dataset.label}: ${formatNum(item.parsed.y)}`,
+            footer: items => items.length ? `Total: ${formatNum(buckets[items[0].dataIndex].total)}` : '',
+          },
+        },
+      },
+      scales: {
+        x: { stacked: true, ticks: { font: { size: 10 }, color: c.subtext, maxRotation: 45 }, grid: { color: c.gridColor } },
+        y: { stacked: true, ticks: { callback: v => formatNum(v), font: { size: 10 }, color: c.subtext, precision: 0 }, grid: { color: c.gridColor } },
+      },
+    },
+  });
+
+  renderMessagesTable(buckets, models);
+}
+
+function renderMessagesTable(buckets, models) {
+  const wrap = document.getElementById('messages-table-wrap');
+  if (!wrap) return;
+  if (!buckets.length) { wrap.innerHTML = ''; return; }
+
+  const head = models.map(m => `<th title="${escapeHtml(m)}">${escapeHtml(shortModel(m))}</th>`).join('');
+  const rows = [...buckets].reverse().map(b => `<tr>
+      <td>${escapeHtml(b.label)}</td>
+      ${models.map(m => `<td>${formatNum(b.byModel[m] || 0)}</td>`).join('')}
+      <td class="tok-total"><strong>${formatNum(b.total)}</strong></td>
+    </tr>`).join('');
+
+  wrap.innerHTML = `
+    <table class="daily-table messages-table">
+      <thead><tr><th>${messagesPeriod === 'week' ? 'Week' : 'Date'}</th>${head}<th>Total</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// ── Text export ───────────────────────────────────────────────────────────────
+// Everything the tab shows, as a plain-text report: summary strip, daily totals,
+// daily cost by model family, token-type breakdown, projects, messages table.
+
+const fullNum = n => Math.round(n).toLocaleString('en-US');
+const usd     = n => '$' + (n || 0).toFixed(4);
+
+// Fixed-width table. Numeric-looking cells are right-aligned.
+function textTable(header, rows) {
+  const all = [header, ...rows].map(r => r.map(v => v == null ? '' : String(v)));
+  const widths = header.map((_, i) => Math.max(...all.map(r => r[i].length)));
+  const isNum = s => /^[-$\d.,%]+$/.test(s);
+  const line = r => r.map((cell, i) =>
+    (isNum(cell) && cell !== '') ? cell.padStart(widths[i]) : cell.padEnd(widths[i])).join('  ').trimEnd();
+  return [line(all[0]), widths.map(w => '-'.repeat(w)).join('  '), ...all.slice(1).map(line)].join('\n');
+}
+
+function buildAnalyticsText() {
+  const daily = lastDailyTotals;
+  const { from, to } = getDateRange();
+  const out = [];
+  const section = (title) => { out.push('', title, '='.repeat(title.length), ''); };
+
+  out.push('Claude Usage - Analytics');
+  out.push(`Generated: ${new Date().toLocaleString()}`);
+  out.push(`Date range: ${from || 'all'} to ${to || 'all'}`);
+  out.push(`Include subagents: ${getIncludeSubagents() ? 'yes' : 'no'}`);
+
+  // Summary
+  const t = daily.reduce((acc, d) => {
+    acc.input += d.input; acc.output += d.output; acc.cacheCreate += d.cacheCreate; acc.cacheRead += d.cacheRead;
+    acc.cost += d.cost; acc.savings += d.savings || 0; acc.messages += d.messages || 0; return acc;
+  }, { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, messages: 0 });
+  const totalTokens = t.input + t.output + t.cacheCreate + t.cacheRead;
+  const days = daily.length;
+  section('Summary');
+  out.push(textTable(['Metric', 'Value'], [
+    ['Total Tokens',  fullNum(totalTokens)],
+    ['Total Cost',    usd(t.cost)],
+    ['Input Tokens',  fullNum(t.input)],
+    ['Output Tokens', fullNum(t.output)],
+    ['Cache Tokens',  fullNum(t.cacheCreate + t.cacheRead)],
+    ['Cache Saved',   usd(t.savings)],
+    ['Messages',      fullNum(t.messages)],
+    ['Active Days',   fullNum(days)],
+    ['Avg / Day',     fullNum(days ? totalTokens / days : 0)],
+  ]));
+
+  // Daily totals
+  section('Daily Token Usage');
+  out.push(textTable(
+    ['Date', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Total', 'Cost (USD)', 'Cache Saved (USD)', 'Messages'],
+    daily.map(d => [d.date, fullNum(d.input), fullNum(d.output), fullNum(d.cacheCreate), fullNum(d.cacheRead),
+      fullNum(d.input + d.output + d.cacheCreate + d.cacheRead), usd(d.cost), usd(d.savings), fullNum(d.messages || 0)])));
+
+  // Daily cost by model family
+  const famTotals = {};
+  for (const d of daily) for (const [fam, c] of Object.entries(d.costByModel || {})) famTotals[fam] = (famTotals[fam] || 0) + c;
+  const families = Object.keys(famTotals).sort((a, b) => famTotals[b] - famTotals[a]);
+  section('Daily Cost by Model (USD)');
+  out.push(textTable(
+    ['Date', ...families, 'Total'],
+    daily.map(d => [d.date, ...families.map(f => usd((d.costByModel || {})[f])), usd(d.cost)])));
+
+  // Token type breakdown
+  const cache = t.cacheCreate + t.cacheRead;
+  const pct = n => totalTokens ? (n / totalTokens * 100).toFixed(1) + '%' : '0.0%';
+  section('Token Type Breakdown');
+  out.push(textTable(['Type', 'Tokens', 'Share'], [
+    ['Input',  fullNum(t.input),  pct(t.input)],
+    ['Output', fullNum(t.output), pct(t.output)],
+    ['Cache',  fullNum(cache),    pct(cache)],
+  ]));
+
+  // Projects (chart shows top 10; export lists all)
+  section('Projects');
+  out.push(textTable(
+    ['#', 'Project', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Total', 'Cost (USD)', 'Messages'],
+    lastProjectTotals.map((p, i) => [i + 1, p.name, fullNum(p.input), fullNum(p.output), fullNum(p.cacheCreate),
+      fullNum(p.cacheRead), fullNum(p.total), usd(p.cost), fullNum(p.messages || 0)])));
+
+  // Messages per day/week by model (current toggle)
+  const { buckets, models } = messageBuckets(daily, messagesPeriod);
+  section(`Messages per ${messagesPeriod === 'week' ? 'Week' : 'Day'} by Model`);
+  out.push(textTable(
+    [messagesPeriod === 'week' ? 'Week' : 'Date', ...models.map(shortModel), 'Total'],
+    buckets.map(b => [b.label, ...models.map(m => fullNum(b.byModel[m] || 0)), fullNum(b.total)])));
+
+  return out.join('\n') + '\n';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 export function initAnalyticsTab() {
+  document.querySelectorAll('#messages-range .stats-range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      messagesPeriod = btn.dataset.period;
+      document.querySelectorAll('#messages-range .stats-range-btn').forEach(b => b.classList.toggle('active', b === btn));
+      renderMessagesChart(lastDailyTotals);
+    });
+  });
+
   document.getElementById('analytics-date-from').addEventListener('change', loadAnalytics);
   document.getElementById('analytics-date-to').addEventListener('change', loadAnalytics);
   document.getElementById('btn-refresh-analytics').addEventListener('click', loadAnalytics);
@@ -296,11 +517,7 @@ export function initAnalyticsTab() {
   });
 
   document.getElementById('btn-export-analytics').addEventListener('click', () => {
-    const rows = [['Date', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Cost (USD)', 'Cache Saved (USD)']];
-    for (const d of lastDailyTotals) {
-      rows.push([d.date, d.input, d.output, d.cacheCreate, d.cacheRead, d.cost.toFixed(4), (d.savings || 0).toFixed(4)]);
-    }
-    window.api.exportFile('claude-usage-daily.csv', toCsv(rows));
+    window.api.exportFile('claude-usage.txt', buildAnalyticsText());
   });
 
   const toggle = document.getElementById('toggle-subagents-analytics');

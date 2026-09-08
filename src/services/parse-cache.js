@@ -7,8 +7,10 @@
 //
 // Layout — models and record keys are the bulk of the bytes, so records are
 // stored as tuples with the model interned into a table:
-//   { version, priceSig, models: [...], files: { path: {s,z,h,p,t,a,r} }, subagents: {...} }
-//   r tuple = [key, ts, modelIndex, input, output, cacheCreate, cacheRead]
+//   { version, priceSig, models: [...], files: { path: {s,z,h,p,t,a,f,r,q} }, subagents: {...} }
+//   r tuple = [key, ts, modelIndex, input, output, cacheCreate, cacheRead, cacheCreate1h, thinking]
+//   q tuple = [uuid, ts, modelIndex] - one per human prompt, model = the reply's model (-1 = none)
+//   f      = undercount flags ({multiIter,webSearch,webFetch,fastMode}); omitted when all zero
 //
 // priceSig invalidates the subagent cache when rates change (those aggregates
 // bake in computed costs; the file cache holds raw tokens and always survives).
@@ -19,7 +21,7 @@ const { getDataDir } = require('./config');
 const { getLatestSnapshot } = require('./price-history');
 const { mark, count } = require('./perf');
 
-const VERSION = 1;
+const VERSION = 5;
 const SAVE_DEBOUNCE_MS = 4000;
 
 function cacheFile() { return path.join(getDataDir(), 'parse-cache.json'); }
@@ -50,9 +52,18 @@ function load(fileCache, subagentCache) {
       parsedBytes: e.p,
       title: e.t ?? null,
       agentSpawnIds: e.a || [],
-      records: (e.r || []).map(([key, ts, mi, input, output, cacheCreate, cacheRead]) => ({
+      flags: {
+        multiIter: e.f?.multiIter || 0,
+        webSearch: e.f?.webSearch || 0,
+        webFetch:  e.f?.webFetch  || 0,
+        fastMode:  e.f?.fastMode  || 0,
+      },
+      records: (e.r || []).map(([key, ts, mi, input, output, cacheCreate, cacheRead, cacheCreate1h, thinking]) => ({
         key, ts, model: mi === -1 ? null : models[mi], input, output, cacheCreate, cacheRead,
+        cacheCreate1h: cacheCreate1h || 0,
+        thinking: thinking || 0,
       })),
+      prompts: (e.q || []).map(([uuid, ts, mi]) => ({ uuid, ts, model: mi === -1 ? null : models[mi] })),
     });
     files++;
     records += (e.r || []).length;
@@ -90,8 +101,12 @@ function serialize(fileCache, subagentCache) {
     if (!scan.statFor(absPath)) continue;
     files[absPath] = {
       s: e.sig, z: e.size, h: e.head, p: e.parsedBytes, t: e.title, a: e.agentSpawnIds,
-      r: e.records.map(r => [r.key, r.ts, mi(r.model), r.input, r.output, r.cacheCreate, r.cacheRead]),
+      r: e.records.map(r => [r.key, r.ts, mi(r.model), r.input, r.output, r.cacheCreate, r.cacheRead, r.cacheCreate1h || 0, r.thinking || 0]),
+      q: e.prompts.map(p => [p.uuid, p.ts, mi(p.model)]),
     };
+    // Zero in every transcript so far — only pay the bytes when something fired.
+    const f = e.flags;
+    if (f && (f.multiIter || f.webSearch || f.webFetch || f.fastMode)) files[absPath].f = f;
   }
 
   // Same pruning for subagent aggregates, keyed "<folder>/<sessionId>".

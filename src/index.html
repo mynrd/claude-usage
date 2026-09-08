@@ -20,12 +20,15 @@
   <!-- Tabs -->
   <nav class="tabs">
     <button class="tab active" data-tab="local">Local Usage</button>
+    <button class="tab" data-tab="projects">Projects</button>
     <button class="tab" data-tab="analytics">Analytics</button>
     <button class="tab" data-tab="stats">Stats</button>
   </nav>
 
-  <!-- Tab 1: Local Usage -->
-  <div id="tab-local" class="tab-content active">
+  <!-- Date range + subagent toggle. Lives outside the tab panes because the
+       Local Usage summary and the Projects list are filled by the same
+       list-projects call and must stay on one range. -->
+  <div class="filter-bar" id="shared-filter">
     <div class="local-date-filter">
       <label class="date-label">From
         <input type="date" id="local-date-from" class="date-input" />
@@ -39,16 +42,22 @@
         <input type="checkbox" id="toggle-subagents-local" /> Include subagents
       </label>
     </div>
+  </div>
 
+  <!-- Tab 1: Local Usage -->
+  <div id="tab-local" class="tab-content active">
     <div class="local-summary" id="local-summary"></div>
 
     <div class="rate-window-bar" id="rate-window-bar"></div>
 
     <div class="cli-usage-bar" id="cli-usage-bar"></div>
+  </div>
 
+  <!-- Tab 2: Projects -->
+  <div id="tab-projects" class="tab-content">
     <div class="local-layout">
       <div class="project-list-panel">
-        <h3>Projects</h3>
+        <h3>Projects <span class="count-badge" id="project-count" hidden></span></h3>
         <div id="project-list" class="project-list"></div>
       </div>
       <div class="project-detail-panel" id="project-detail">
@@ -57,7 +66,7 @@
     </div>
   </div>
 
-  <!-- Tab 2: Analytics -->
+  <!-- Tab 3: Analytics -->
   <div id="tab-analytics" class="tab-content">
     <div class="local-date-filter">
       <label class="date-label">From
@@ -68,7 +77,7 @@
       </label>
       <button id="btn-refresh-analytics" class="btn btn-small">&#8635; Refresh</button>
       <button id="btn-clear-analytics-dates" class="btn btn-small">Clear</button>
-      <button id="btn-export-analytics" class="btn btn-small" title="Export daily totals as CSV">Export CSV</button>
+      <button id="btn-export-analytics" class="btn btn-small" title="Export everything on this tab as a text file">Export</button>
       <label class="subagent-toggle" title="Fold subagent / agent-team token spend into all totals">
         <input type="checkbox" id="toggle-subagents-analytics" /> Include subagents
       </label>
@@ -93,10 +102,21 @@
         <div class="analytics-chart-title">Top Projects by Usage</div>
         <div class="analytics-chart-wrap"><canvas id="chart-top-projects"></canvas></div>
       </div>
+      <div class="analytics-chart-card analytics-chart-card--wide">
+        <div class="analytics-chart-head">
+          <div class="analytics-chart-title">Messages per Day (by model)</div>
+          <div class="stats-range" id="messages-range">
+            <button class="stats-range-btn active" data-period="day">Day</button>
+            <button class="stats-range-btn" data-period="week">Week</button>
+          </div>
+        </div>
+        <div class="analytics-chart-wrap"><canvas id="chart-messages"></canvas></div>
+        <div class="messages-table-wrap" id="messages-table-wrap"></div>
+      </div>
     </div>
   </div>
 
-  <!-- Tab 3: Stats (mirrors `claude /usage` → Stats) -->
+  <!-- Tab 4: Stats (mirrors `claude /usage` → Stats) -->
   <div id="tab-stats" class="tab-content">
     <div class="stats-toolbar">
       <div class="stats-subtabs">

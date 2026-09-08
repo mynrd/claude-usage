@@ -375,6 +375,12 @@ html { height: 100%; overflow: hidden; }
 .delta-flat { color: #9CA3AF; }
 
 /* ── Local date filter ────────────────────────────────────────────── */
+/* Shared shell for the range filter that sits above the tab panes (Local
+   Usage + Projects). The pane's own 20px top padding is the gap below it. */
+.filter-bar { padding: 20px 24px 0; flex: 0 0 auto; }
+.filter-bar[hidden] { display: none; }
+.filter-bar .local-date-filter { margin-bottom: 0; }
+
 .local-date-filter {
   display: flex;
   align-items: center;
@@ -418,7 +424,7 @@ html { height: 100%; overflow: hidden; }
 /* ── Local Usage tab ──────────────────────────────────────────────── */
 .local-summary {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -450,6 +456,21 @@ html { height: 100%; overflow: hidden; }
   min-height: 0;
 }
 .project-list-panel h3 { font-size: 13px; margin-bottom: 10px; color: var(--subtext); }
+
+/* Count pill next to a panel heading — same shape as .model-badge. */
+.count-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  vertical-align: middle;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.count-badge[hidden] { display: none; }
 
 .project-list { display: flex; flex-direction: column; gap: 4px; }
 .project-item {
@@ -580,8 +601,9 @@ html { height: 100%; overflow: hidden; }
    which absorbs the remaining space. Widths land on the th cells. */
 .session-table { table-layout: fixed; }
 .session-table th:nth-child(2) { width: 150px; } /* Models */
-.session-table th:nth-child(3) { width: 130px; } /* Total Tokens (cost) */
-.session-table th:nth-child(4) { width: 75px; }  /* actions */
+.session-table th:nth-child(3) { width: 70px; }  /* Messages */
+.session-table th:nth-child(4) { width: 130px; } /* Total Tokens (cost) */
+.session-table th:nth-child(5) { width: 75px; }  /* actions */
 .session-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .detail-chart-container {
@@ -979,7 +1001,8 @@ html { height: 100%; overflow: hidden; }
 
 body.widget-mode .header,
 body.widget-mode .tabs,
-body.widget-mode .tab-content { display: none !important; }
+body.widget-mode .tab-content,
+body.widget-mode .filter-bar { display: none !important; }
 
 body.widget-mode .widget-view {
   display: flex;
@@ -1200,21 +1223,21 @@ body.widget-mode .widget-view {
 /* ── Analytics tab ────────────────────────────────────────────────── */
 .analytics-summary {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(8, 1fr);
   gap: 10px;
   margin-bottom: 16px;
 }
 @media (max-width: 860px) {
-  .analytics-summary { grid-template-columns: repeat(3, 1fr); }
+  .analytics-summary { grid-template-columns: repeat(4, 1fr); }
 }
 
+/* Content-sized: three rows no longer fit the pane, so the grid must grow and
+   let .tab-content scroll instead of squeezing rows until charts spill out. */
 .analytics-charts-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: auto auto;
   gap: 14px;
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
 }
 
 .analytics-chart-card {
@@ -1255,6 +1278,15 @@ body.widget-mode .widget-view {
   justify-content: center;
   max-height: 220px;
 }
+
+/* Title row with a Day/Week toggle on the right (reuses .stats-range buttons). */
+.analytics-chart-head { display: flex; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
+.analytics-chart-head .analytics-chart-title { margin-bottom: 0; }
+.analytics-chart-card--wide { grid-column: 1 / -1; }
+
+/* Messages per period table under the chart; borrows .daily-table styling. */
+.messages-table-wrap { margin-top: 12px; max-height: 240px; overflow: auto; flex-shrink: 0; }
+.messages-table th:not(:first-child), .messages-table td:not(:first-child) { text-align: right; }
 
 /* ── Model Detail Modal ───────────────────────────────────────────── */
 .model-detail-overlay {
@@ -1364,6 +1396,23 @@ body.widget-mode .widget-view {
   font-weight: 700;
 }
 .grand-total-figures { font-weight: 600; }
+.tok-thinking { color: var(--subtext); font-size: 11px; }
+.tok-time { color: var(--subtext); white-space: nowrap; }
+.savings-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--subtext);
+  text-align: right;
+}
+.usage-warning {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  background: var(--help-bg);
+  border: 1px solid var(--help-bd);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text);
+}
 /* Fixed width sized to exactly two icon buttons, so the column doesn't
    wobble between rows or collapse when a search re-render is narrow. */
 .session-actions { white-space: nowrap; width: 62px; min-width: 62px; text-align: center; }

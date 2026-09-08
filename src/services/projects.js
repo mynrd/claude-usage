@@ -24,7 +24,8 @@ function modelFamily(m) {
 // duplicate rows contribute 0; placeholder→final rows converge to the final
 // value. Returns the per-category delta to add, plus `first` (first sighting
 // of the key — used for turn counts). Rows without an id count as-is.
-// Takes a compact usage row: { key | id+requestId, input, output, cacheCreate, cacheRead }.
+// Takes a compact usage row: { key | id+requestId, input, output, cacheCreate,
+// cacheCreate1h, cacheRead, thinking }.
 // `key` is the pre-joined `id:requestId` cached rows carry (one string instead
 // of two shrinks the on-disk parse cache noticeably).
 function createUsageDeduper() {
@@ -34,14 +35,16 @@ function createUsageDeduper() {
       input: row.input || 0,
       output: row.output || 0,
       cacheCreate: row.cacheCreate || 0,
+      cacheCreate1h: row.cacheCreate1h || 0,
       cacheRead: row.cacheRead || 0,
+      thinking: row.thinking || 0,
     };
     const key = row.key !== undefined ? row.key : (row.id ? row.id + ':' + (row.requestId || '') : null);
     if (!key) return { ...cur, first: true };
     const prev = seen.get(key);
     if (!prev) { seen.set(key, cur); return { ...cur, first: true }; }
     const delta = { first: false };
-    for (const c of ['input', 'output', 'cacheCreate', 'cacheRead']) {
+    for (const c of ['input', 'output', 'cacheCreate', 'cacheCreate1h', 'cacheRead', 'thinking']) {
       delta[c] = cur[c] > prev[c] ? cur[c] - prev[c] : 0;
       if (cur[c] > prev[c]) prev[c] = cur[c];
     }
@@ -77,18 +80,78 @@ function readRange(absPath, start, end) {
   }
 }
 
+// Usage shapes that would silently undercount if Claude Code starts emitting
+// them. Both are zero in every transcript seen so far; count them per file so
+// the modal can say so instead of quietly reporting a low number.
+//   multiIter  — `usage.iterations` with more than one element: only the
+//                outer counters are summed here, so extra iterations are lost.
+//   webSearch/webFetch — server tool calls that bill per request, not per
+//                token, so no amount of token math prices them.
+//   fastMode   — `usage.speed: "fast"`: the same model billed at roughly twice
+//                the standard rate, which the rate cards here do not carry.
+function newFlags() { return { multiIter: 0, webSearch: 0, webFetch: 0, fastMode: 0 }; }
+
+function tallyFlags(flags, u) {
+  if (u.iterations && u.iterations.length > 1) flags.multiIter++;
+  if (u.speed === 'fast') flags.fastMode++;
+  const stu = u.server_tool_use;
+  if (stu) {
+    flags.webSearch += stu.web_search_requests || 0;
+    flags.webFetch  += stu.web_fetch_requests  || 0;
+  }
+}
+
+function anyFlags(f) {
+  return !!f && (f.multiIter > 0 || f.webSearch > 0 || f.webFetch > 0 || f.fastMode > 0);
+}
+
+// A message the user personally typed. `user` records also carry tool results,
+// slash-command markup, IDE context, task notifications, compact summaries and
+// meta records - none of those count. Rules verified against every transcript
+// on this machine.
+const NOT_PROMPT_PREFIXES = ['<command-name', '<command-message', '<local-command-stdout', '<local-command-caveat', '<task-notification', '<bash-input', '[Request interrupted'];
+function isHumanPrompt(rec) {
+  if (rec.type !== 'user' || rec.isMeta || rec.isCompactSummary) return false;
+  if (rec.origin && rec.origin.kind !== 'human') return false;
+  const ct = rec.message?.content;
+  let text, hasImage = false;
+  if (typeof ct === 'string') {
+    text = ct;
+  } else if (Array.isArray(ct)) {
+    hasImage = ct.some(b => b.type === 'image');
+    if (!hasImage && !ct.some(b => b.type === 'text')) return false;
+    // The CLI prepends <ide_opened_file> / <ide_selection> blocks to what the user typed.
+    text = ct.filter(b => b.type === 'text' && !(b.text || '').trim().startsWith('<ide_')).map(b => b.text || '').join('\n');
+  } else {
+    return false;
+  }
+  text = text.trim();
+  if (!text && !hasImage) return false;
+  return !NOT_PROMPT_PREFIXES.some(p => text.startsWith(p));
+}
+
 // Feed complete lines into an entry. Returns the number of bytes consumed —
 // a trailing partial line (Claude is mid-write) is left for the next pass.
 function parseInto(entry, buf) {
   const lastNl = buf.lastIndexOf(0x0a);
   if (lastNl < 0) return 0;
+  const flags = entry.flags || (entry.flags = newFlags());
+  const prompts = entry.prompts || (entry.prompts = []);
   const text = buf.subarray(0, lastNl + 1).toString('utf8');
   for (const line of text.split('\n')) {
     if (!line) continue;
     try {
       const rec = JSON.parse(line);
       if (rec.type === 'ai-title' && rec.aiTitle) entry.title = rec.aiTitle;
+      if (isHumanPrompt(rec)) prompts.push({ uuid: rec.uuid || null, ts: rec.timestamp ? Date.parse(rec.timestamp) : null, model: null });
       if (rec.type !== 'assistant') continue;
+      // Attribute the latest unanswered prompt to the model that replied. Works
+      // across tail parses; a prompt the next prompt overtakes stays null.
+      const model = rec.message?.model;
+      if (model && model !== '<synthetic>' && prompts.length) {
+        const last = prompts[prompts.length - 1];
+        if (last.model === null) last.model = model;
+      }
       if (Array.isArray(rec.message?.content)) {
         for (const b of rec.message.content) {
           if (b.type === 'tool_use' && b.name === 'Agent') entry.agentSpawnIds.push(b.id || null);
@@ -97,6 +160,7 @@ function parseInto(entry, buf) {
       if (rec.message?.usage) {
         const u = rec.message.usage;
         const id = rec.message.id || null;
+        tallyFlags(flags, u);
         entry.records.push({
           key: id ? id + ':' + (rec.requestId || '') : null,
           ts: rec.timestamp ? Date.parse(rec.timestamp) : null,
@@ -104,7 +168,10 @@ function parseInto(entry, buf) {
           input: u.input_tokens || 0,
           output: u.output_tokens || 0,
           cacheCreate: u.cache_creation_input_tokens || 0,
+          cacheCreate1h: u.cache_creation?.ephemeral_1h_input_tokens || 0,
           cacheRead: u.cache_read_input_tokens || 0,
+          // Subset of output_tokens, not additional — display only, never priced.
+          thinking: u.output_tokens_details?.thinking_tokens || 0,
         });
       }
     } catch {}
@@ -140,7 +207,7 @@ function getFileUsage(absPath) {
 
   count('sessionFilesParsed');
   count('sessionMbRead', st.size / 1048576);
-  const entry = { sig, size: st.size, head: null, parsedBytes: 0, title: null, agentSpawnIds: [], records: [] };
+  const entry = { sig, size: st.size, head: null, parsedBytes: 0, title: null, agentSpawnIds: [], records: [], flags: newFlags(), prompts: [] };
   let buf = Buffer.alloc(0);
   try { buf = fs.readFileSync(absPath); } catch {}
   entry.head = buf.subarray(0, HEAD_BYTES).toString('base64');
@@ -157,6 +224,23 @@ function getFileUsage(absPath) {
 function listSessionFilesOldestFirst(dir) {
   const folder = scan.getIndex().folders.find(f => f.path === dir);
   return folder ? folder.sessions.map(s => s.name) : [];
+}
+
+// Walk a file's human prompts: skip resume-copied duplicates (seenPrompts is
+// folder scoped; files arrive oldest-first so the original keeps the prompt)
+// and apply the same date filter the usage rows use. onEach(prompt, dt).
+function countPrompts(entry, seenPrompts, dtStart, dtEnd, onEach) {
+  for (const p of (entry ? entry.prompts : [])) {
+    if (p.uuid) {
+      if (seenPrompts.has(p.uuid)) continue;
+      seenPrompts.add(p.uuid);
+    }
+    const dt = p.ts != null ? new Date(p.ts) : null;
+    if ((dtStart || dtEnd) && !dt) continue;
+    if (dt && dtStart && dt < dtStart) continue;
+    if (dt && dtEnd   && dt > dtEnd)   continue;
+    onEach(p, dt);
+  }
 }
 
 // Probing the filesystem to un-encode a folder name is stable for the life of
@@ -223,8 +307,10 @@ function listLocalProjects(startDate, endDate, includeSub = false, onProgress = 
 
     const { displayName, fullPath: projectPath } = resolveProjectName(folder);
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
+    const seenPrompts = new Set();
     let totalInput = 0, totalOutput = 0, totalCacheCreate = 0, totalCacheRead = 0;
     let totalCost = 0, totalSavings = 0, lastActive = null, sessionCount = 0, hasMatchingRecords = false;
+    let messageCount = 0;
 
     let lastWriteMs = 0;
     for (const jf of jsonlFiles) {
@@ -233,6 +319,10 @@ function listLocalProjects(startDate, endDate, includeSub = false, onProgress = 
       const w = sessionLastWriteMs(fullPath, jf);
       if (w > lastWriteMs) lastWriteMs = w;
       const entry = getFileUsage(path.join(fullPath, jf));
+      let sMessages = 0;
+      countPrompts(entry, seenPrompts, dtStart, dtEnd, () => { sMessages++; });
+      if (sMessages) hasMatchingRecords = true;
+      messageCount += sMessages;
       for (const row of (entry ? entry.records : [])) {
         const dt = row.ts != null ? new Date(row.ts) : null;
         if ((dtStart || dtEnd) && !dt) continue;
@@ -244,7 +334,7 @@ function listLocalProjects(startDate, endDate, includeSub = false, onProgress = 
         sCacheCreate += d.cacheCreate;
         sCacheRead += d.cacheRead;
         const day = dt ? localDay(dt) : null;
-        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day);
+        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day, d.cacheCreate1h);
         sCost += bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
         sSavings += bd.cacheReadSavings;
         sessionHasMatch = true;
@@ -280,7 +370,7 @@ function listLocalProjects(startDate, endDate, includeSub = false, onProgress = 
     if ((!dtStart && !dtEnd) || hasMatchingRecords) {
       project = {
         folder, name: displayName, fullPath: projectPath,
-        sessionCount, totalInput, totalOutput, totalCacheCreate, totalCacheRead,
+        sessionCount, messageCount, totalInput, totalOutput, totalCacheCreate, totalCacheRead,
         totalTokens: totalInput + totalOutput + totalCacheCreate + totalCacheRead,
         totalCost, totalSavings, lastActive: lastActive ? lastActive.toISOString() : null,
         lastWriteMs,
@@ -318,12 +408,16 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
   const dailyMap = {};
   const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
   const seenAgentSpawns = new Set();   // streamed lines repeat tool_use blocks (D4)
+  const seenPrompts = new Set();
+  const newModelUsage = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0, savings: 0, thinking: 0, messages: 0 });
+  const newDay = (day) => ({ date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, messages: 0 });
 
   for (const jf of listSessionFilesOldestFirst(dir)) {
     const sessionId = jf.replace('.jsonl', '');
     let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
     let firstTs = null, lastTs = null;
     let subagentCount = 0;
+    let messages = 0;
     const models = new Set();
     const modelUsage = {};
 
@@ -335,6 +429,19 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
         subagentCount++;
       }
     }
+    // Unreplied prompts (model null) count for the session but for no model row.
+    countPrompts(entry, seenPrompts, dtStart, dtEnd, (p, dt) => {
+      messages++;
+      if (p.model) {
+        if (!modelUsage[p.model]) modelUsage[p.model] = newModelUsage();
+        modelUsage[p.model].messages++;
+      }
+      if (dt) {
+        const day = localDay(dt);
+        if (!dailyMap[day]) dailyMap[day] = newDay(day);
+        dailyMap[day].messages++;
+      }
+    });
     for (const row of (entry ? entry.records : [])) {
       const dt = row.ts != null ? new Date(row.ts) : null;
       if ((dtStart || dtEnd) && !dt) continue;
@@ -347,13 +454,15 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
       cacheCreate += d.cacheCreate;
       cacheRead   += d.cacheRead;
       const day = dt ? localDay(dt) : null;
-      const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day);
+      const bd  = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, recModel, day, d.cacheCreate1h);
       const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
       cost += recCost;
       if (recModel && recModel !== '<synthetic>') {
         models.add(recModel);
-        if (!modelUsage[recModel]) modelUsage[recModel] = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, cost: 0 };
+        if (!modelUsage[recModel]) modelUsage[recModel] = newModelUsage();
         const mu = modelUsage[recModel];
+        mu.savings         += bd.cacheReadSavings;
+        mu.thinking        += d.thinking;
         mu.input           += d.input;
         mu.output          += d.output;
         mu.cacheCreate     += d.cacheCreate;
@@ -367,7 +476,7 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
       if (dt) {
         if (!firstTs || dt < firstTs) firstTs = dt;
         if (!lastTs  || dt > lastTs)  lastTs  = dt;
-        if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+        if (!dailyMap[day]) dailyMap[day] = newDay(day);
         dailyMap[day].input       += d.input;
         dailyMap[day].output      += d.output;
         dailyMap[day].cacheCreate += d.cacheCreate;
@@ -390,7 +499,7 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
             if (dtStart && d < dtStart) continue;
             if (dtEnd && d > dtEnd) continue;
           }
-          if (!dailyMap[day]) dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0 };
+          if (!dailyMap[day]) dailyMap[day] = newDay(day);
           dailyMap[day].input += v.input; dailyMap[day].output += v.output;
           dailyMap[day].cacheCreate += v.cacheCreate; dailyMap[day].cacheRead += v.cacheRead;
           dailyMap[day].cost += v.cost;
@@ -399,10 +508,11 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
     }
 
     const total = input + output + cacheCreate + cacheRead;
-    if (total > 0) {
+    if (total > 0 || messages > 0) {
       sessions.push({
-        sessionId, title, subagentCount, models: [...models],
+        sessionId, title, subagentCount, models: [...models], messages,
         input, output, cacheCreate, cacheRead, total, cost,
+        ...(anyFlags(entry && entry.flags) ? { flags: entry.flags } : {}),
         modelUsage: Object.entries(modelUsage).map(([model, u]) => ({ model, ...u })),
         startedAt: firstTs ? firstTs.toISOString() : null,
         lastAt:    lastTs  ? lastTs.toISOString()  : null,
@@ -422,25 +532,27 @@ function getProjectDetail(folder, startDate, endDate, includeSub = false) {
 
 function getTodayLocalSummary(includeSub = false) {
   const dir = getClaudeProjectsDir();
-  if (!fs.existsSync(dir)) return { input: 0, output: 0, total: 0, cost: 0 };
+  if (!fs.existsSync(dir)) return { input: 0, output: 0, total: 0, cost: 0, messages: 0 };
 
   const today = localDay(new Date());
-  let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0;
+  let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, cost = 0, messages = 0;
 
   for (const fEntry of scan.getIndex().folders) {
     const folder = fEntry.folder;
     const fullPath = fEntry.path;
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
+    const seenPrompts = new Set();
     for (const jf of fEntry.sessions.map(s => s.name)) {
       const entry = getFileUsage(path.join(fullPath, jf));
       const rows = entry ? entry.records : [];
       const sessionModel = (rows.find(r => r.model) || {}).model || null;
+      countPrompts(entry, seenPrompts, null, null, (p, dt) => { if (dt && localDay(dt) === today) messages++; });
       for (const row of rows) {
         if (row.ts == null) continue;
         if (localDay(new Date(row.ts)) !== today) continue;
         const d = dedupe(row);
         input += d.input; output += d.output; cacheCreate += d.cacheCreate; cacheRead += d.cacheRead;
-        cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, today);
+        cost += calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, today, d.cacheCreate1h);
       }
 
       if (includeSub) {
@@ -453,7 +565,7 @@ function getTodayLocalSummary(includeSub = false) {
       }
     }
   }
-  return { input, output, cacheCreate, cacheRead, total: input + output + cacheCreate + cacheRead, cost };
+  return { input, output, cacheCreate, cacheRead, total: input + output + cacheCreate + cacheRead, cost, messages };
 }
 
 const _agentModelCache = {};
@@ -741,7 +853,7 @@ function getSessionSubagents(folder, sessionId) {
   const sess = scan.getSession(folder, sessionId);
   const subdir = path.join(getClaudeProjectsDir(), folder, sessionId, 'subagents');
   const agentFiles = sess ? sess.subFiles.map(f => f.file) : listAgentTranscripts(subdir);
-  if (!agentFiles.length) return { agentCount: 0, agents: [], totals: null, daily: {}, records: [] };
+  if (!agentFiles.length) return { agentCount: 0, agents: [], totals: null, daily: {}, records: [], flags: null };
 
   const cacheKey = folder + '/' + sessionId;
   const sig = sess ? sess.subSig : tally('subagentDirSig', () => subagentDirSignature(subdir));
@@ -751,12 +863,13 @@ function getSessionSubagents(folder, sessionId) {
   count('subagentSessionsParsed');
 
   const byName = {};
-  const totals = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0 };
+  const totals = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, savings: 0, thinking: 0 };
+  const flags = newFlags();
   const daily = {}; // day -> { input, output, cacheCreate, cacheRead, cost, savings, costByModel }
   const records = []; // post-dedupe { ts, input, output, cacheCreate, cacheRead, cost } for rate windows
   let agentCount = 0;
 
-  const newAcc = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
+  const newAcc = () => ({ input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, savings: 0, thinking: 0, toolUses: 0, turns: 0 });
 
   // Agent-team teammates each persist a copy of shared conversation turns, so
   // dedup must span ALL agent files of the session together (PLANNING.md F2/D2).
@@ -767,6 +880,9 @@ function getSessionSubagents(folder, sessionId) {
 
   for (const jfPath of agentFiles) {
     let firstUser = null;
+    // Wall clock spans every record type, not just assistant ones, so time the
+    // agent spent waiting on its own tool calls counts.
+    let firstTs = null, lastTs = null;
     // Accumulate per model within the transcript — a subagent can run on more than
     // one model (e.g. an opus thread that delegates a step to haiku), and those have
     // different rate cards, so they must never be summed into one row.
@@ -780,6 +896,13 @@ function getSessionSubagents(folder, sessionId) {
         if (!line) continue;
         try {
           const rec = JSON.parse(line);
+          if (rec.timestamp) {
+            const t = Date.parse(rec.timestamp);
+            if (!Number.isNaN(t)) {
+              if (firstTs === null || t < firstTs) firstTs = t;
+              if (lastTs === null || t > lastTs) lastTs = t;
+            }
+          }
           if (firstUser === null && rec.type === 'user' && typeof rec.message?.content === 'string') {
             firstUser = rec.message.content;
           }
@@ -796,6 +919,7 @@ function getSessionSubagents(folder, sessionId) {
           }
           if (rec.message?.usage) {
             const u = rec.message.usage;
+            tallyFlags(flags, u);
             const ts = rec.timestamp ? Date.parse(rec.timestamp) : null;
             const day = ts != null ? localDay(new Date(ts)) : null;
             const d = dedupe({
@@ -804,15 +928,19 @@ function getSessionSubagents(folder, sessionId) {
               input: u.input_tokens || 0,
               output: u.output_tokens || 0,
               cacheCreate: u.cache_creation_input_tokens || 0,
+              cacheCreate1h: u.cache_creation?.ephemeral_1h_input_tokens || 0,
               cacheRead: u.cache_read_input_tokens || 0,
+              thinking: u.output_tokens_details?.thinking_tokens || 0,
             });
-            const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, model, day);
+            const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, model, day, d.cacheCreate1h);
             const recCost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
             const e = ensure(mk);
             e.input += d.input; e.output += d.output; e.cacheCreate += d.cacheCreate; e.cacheRead += d.cacheRead;
             e.cost += recCost;
             e.inputCost += bd.input; e.outputCost += bd.output;
             e.cacheCreateCost += bd.cacheCreate; e.cacheReadCost += bd.cacheRead;
+            e.savings += bd.cacheReadSavings;
+            e.thinking += d.thinking;
             if (d.first) e.turns++;
             if (ts != null) records.push({ ts, input: d.input, output: d.output, cacheCreate: d.cacheCreate, cacheRead: d.cacheRead, cost: recCost });
             if (day) {
@@ -856,16 +984,22 @@ function getSessionSubagents(folder, sessionId) {
 
       // One row per (teammate, model) so each row maps to a single rate card.
       const key = name + ' ' + mk;
-      const g = byName[key] || (byName[key] = { name, model: mk, spawns: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, toolUses: 0, turns: 0 });
+      const g = byName[key] || (byName[key] = { name, model: mk, spawns: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, total: 0, cost: 0, inputCost: 0, outputCost: 0, cacheCreateCost: 0, cacheReadCost: 0, thinking: 0, toolUses: 0, turns: 0, durationMs: 0 });
       g.spawns++;
       g.input += e.input; g.output += e.output; g.cacheCreate += e.cacheCreate; g.cacheRead += e.cacheRead;
       g.total += total; g.cost += e.cost; g.toolUses += e.toolUses; g.turns += e.turns;
       g.inputCost += e.inputCost; g.outputCost += e.outputCost; g.cacheCreateCost += e.cacheCreateCost; g.cacheReadCost += e.cacheReadCost;
+      g.thinking += e.thinking;
+      // The span is per transcript, so a file that ran two models attributes its
+      // whole span to both rows — wall time has no per-model split.
+      if (firstTs !== null && lastTs > firstTs) g.durationMs += lastTs - firstTs;
 
       totals.input += e.input; totals.output += e.output; totals.cacheCreate += e.cacheCreate;
       totals.cacheRead += e.cacheRead; totals.total += total; totals.cost += e.cost;
       totals.inputCost += e.inputCost; totals.outputCost += e.outputCost;
       totals.cacheCreateCost += e.cacheCreateCost; totals.cacheReadCost += e.cacheReadCost;
+      totals.savings += e.savings;
+      totals.thinking += e.thinking;
     }
     if (fileHadActivity) agentCount++;
   }
@@ -874,7 +1008,7 @@ function getSessionSubagents(folder, sessionId) {
     .map(g => ({ ...g, models: [g.model] }))
     .sort((a, b) => b.cost - a.cost || b.total - a.total);
 
-  const result = { agentCount, agents, totals: agentCount ? totals : null, daily, records };
+  const result = { agentCount, agents, totals: agentCount ? totals : null, daily, records, flags: anyFlags(flags) ? flags : null };
   _subagentCache.set(cacheKey, { sig, result });
   count('subagentParseMs', performance.now() - _t0);
   return result;
@@ -972,7 +1106,7 @@ function getRateWindows(includeSub = true) {
         const day = localDay(new Date(row.ts));
         events.push({
           ts: row.ts, input: d.input, output: d.output, cacheCreate: d.cacheCreate, cacheRead: d.cacheRead,
-          cost: calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, day),
+          cost: calcCost(d.input, d.output, d.cacheCreate, d.cacheRead, row.model || sessionModel, day, d.cacheCreate1h),
         });
       }
       if (includeSub) {
@@ -1070,12 +1204,22 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
 
     const { displayName } = resolveProjectName(folder);
     const dedupe = createUsageDeduper(); // folder scope (PLANNING.md D2)
-    let pInput = 0, pOutput = 0, pCacheCreate = 0, pCacheRead = 0, pCost = 0;
+    const seenPrompts = new Set();
+    let pInput = 0, pOutput = 0, pCacheCreate = 0, pCacheRead = 0, pCost = 0, pMessages = 0;
 
-    const ensureDay = (day) => dailyMap[day] || (dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, costByModel: {} });
+    const ensureDay = (day) => dailyMap[day] || (dailyMap[day] = { date: day, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, cost: 0, savings: 0, costByModel: {}, messages: 0, messagesByModel: {} });
 
     for (const jf of jsonlFiles) {
       const entry = getFileUsage(path.join(fullPath, jf));
+      // messagesByModel is keyed by full model id; 'no-reply' = no assistant reply followed.
+      countPrompts(entry, seenPrompts, dtStart, dtEnd, (p, dt) => {
+        pMessages++;
+        if (!dt) return;
+        const dm = ensureDay(localDay(dt));
+        dm.messages++;
+        const key = p.model || 'no-reply';
+        dm.messagesByModel[key] = (dm.messagesByModel[key] || 0) + 1;
+      });
       for (const row of (entry ? entry.records : [])) {
         const dt = row.ts != null ? new Date(row.ts) : null;
         if ((dtStart || dtEnd) && !dt) continue;
@@ -1083,7 +1227,7 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
         if (dt && dtEnd   && dt > dtEnd)   continue;
         const d = dedupe(row);
         const day = dt ? localDay(dt) : null;
-        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day);
+        const bd = calcCostBreakdown(d.input, d.output, d.cacheCreate, d.cacheRead, row.model, day, d.cacheCreate1h);
         const cost = bd.input + bd.output + bd.cacheCreate + bd.cacheRead;
 
         pInput += d.input; pOutput += d.output; pCacheCreate += d.cacheCreate; pCacheRead += d.cacheRead; pCost += cost;
@@ -1126,7 +1270,7 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
 
     const pTotal = pInput + pOutput + pCacheCreate + pCacheRead;
     if (pTotal > 0) {
-      projectMap[folder] = { name: displayName, input: pInput, output: pOutput, cacheCreate: pCacheCreate, cacheRead: pCacheRead, total: pTotal, cost: pCost };
+      projectMap[folder] = { name: displayName, input: pInput, output: pOutput, cacheCreate: pCacheCreate, cacheRead: pCacheRead, total: pTotal, cost: pCost, messages: pMessages };
     }
   }
 
@@ -1140,4 +1284,4 @@ function getAggregatedDailyTotals(startDate, endDate, includeSub = false) {
 // a cold start otherwise re-reads every transcript on disk (352 MB here).
 function getCaches() { return { fileCache: _fileCache, subagentCache: _subagentCache }; }
 
-module.exports = { getClaudeProjectsDir, listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches, getCaches };
+module.exports = { getClaudeProjectsDir, listLocalProjects, getProjectDetail, getTodayLocalSummary, getSessionChat, getSessionSubagents, searchSessions, getAggregatedDailyTotals, getRateWindows, clearCostCaches, getCaches, isHumanPrompt };

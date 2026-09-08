@@ -24,6 +24,7 @@ function summaryHtml(projects) {
   const totalCacheCreate = projects.reduce((s, p) => s + p.totalCacheCreate,   0);
   const totalCacheRead   = projects.reduce((s, p) => s + p.totalCacheRead,     0);
   const totalSavings     = projects.reduce((s, p) => s + (p.totalSavings || 0), 0);
+  const totalMessages    = projects.reduce((s, p) => s + (p.messageCount || 0), 0);
   const totalTokens      = totalInput + totalOutput + totalCacheCreate + totalCacheRead;
 
   return `
@@ -46,6 +47,10 @@ function summaryHtml(projects) {
     <div class="summary-stat" title="What the cache-read tokens would have cost extra at the full input rate">
       <div class="stat-value stat-savings">${formatCost(totalSavings)}</div>
       <div class="stat-label">Cache Saved</div>
+    </div>
+    <div class="summary-stat" title="Prompts you typed">
+      <div class="stat-value">${formatNum(totalMessages)}</div>
+      <div class="stat-label">Messages</div>
     </div>
     <div class="summary-stat summary-stat-full">
       <div class="stat-value">${formatNum(totalTokens)}</div>
@@ -87,13 +92,14 @@ let detailLoadSeq = 0;  // same, for the detail panel
 let progressSeen = 0;
 
 function paintSkeleton() {
-  document.getElementById('local-summary').innerHTML = Array.from({ length: 6 }, (_, i) => `
-    <div class="summary-stat${i === 5 ? ' summary-stat-full' : ''}">
+  document.getElementById('local-summary').innerHTML = Array.from({ length: 7 }, (_, i) => `
+    <div class="summary-stat${i === 6 ? ' summary-stat-full' : ''}">
       <span class="skel"></span>
       <span class="skel skel-label"></span>
     </div>`).join('');
   document.getElementById('rate-window-bar').innerHTML = '<span class="skel"></span>';
 
+  setProjectCount(null);
   const listEl = document.getElementById('project-list');
   listEl.dataset.state = 'skeleton';
   listEl.innerHTML = `
@@ -105,6 +111,14 @@ function paintSkeleton() {
       <span class="skel"></span>
       <span class="skel skel-meta"></span>
     </div>`).join('');
+}
+
+// `n === null` hides the pill (scan in flight, count not final yet).
+function setProjectCount(n) {
+  const el = document.getElementById('project-count');
+  if (!el) return;
+  el.hidden = n === null;
+  el.textContent = n === null ? '' : `${n} found`;
 }
 
 function onScanProgress(payload) {
@@ -146,6 +160,7 @@ export async function loadLocalUsage() {
   listEl.dataset.state = 'live';
   listEl.innerHTML = projects.length ? '' : '<div class="empty-state" style="padding:20px">No projects in range</div>';
   for (const p of projects) listEl.appendChild(projectRowEl(p));
+  setProjectCount(projects.length);
 
   mark(`project list render ${(performance.now() - _tRender).toFixed(0)}ms`);
 
@@ -438,6 +453,7 @@ function renderSessionRows(sessions) {
     return `<tr class="session-row" data-sid="${s.sessionId}">
       <td class="session-name" title="${s.title ? s.sessionId : ''}">${liveDot(s.lastWriteMs)}${displayName} ${idSuffix} ${subagentBadge}</td>
       <td>${modelHtml}</td>
+      <td class="tok-total">${formatNum(s.messages || 0)}</td>
       <td class="tok-total">${formatNum(total)} <span class="tok-cost">(${formatCost(s.cost || 0)})</span></td>
       <td class="session-actions">
         <button class="btn-row-icon btn-chat" data-sid="${s.sessionId}" title="View conversation">${CHAT_ICON}</button>
@@ -474,7 +490,7 @@ function renderSessionsTab(detail, folder) {
     </div>
     <table class="session-table">
       <thead><tr>
-        <th>Session</th><th>Models</th><th>Total Tokens</th><th></th>
+        <th>Session</th><th>Models</th><th>Messages</th><th>Total Tokens</th><th></th>
       </tr></thead>
       <tbody id="session-tbody">${renderSessionRows(detail.sessions)}</tbody>
     </table>
@@ -482,9 +498,9 @@ function renderSessionsTab(detail, folder) {
   bindSessionClicks(sessEl, folder);
 
   sessEl.querySelector('#btn-export-sessions').addEventListener('click', () => {
-    const rows = [['Session ID', 'Title', 'Models', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Total', 'Cost (USD)', 'Started', 'Last Active']];
+    const rows = [['Session ID', 'Title', 'Models', 'Messages', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Total', 'Cost (USD)', 'Started', 'Last Active']];
     for (const s of detail.sessions) {
-      rows.push([s.sessionId, s.title || '', (s.models || []).join(' '), s.input, s.output,
+      rows.push([s.sessionId, s.title || '', (s.models || []).join(' '), s.messages || 0, s.input, s.output,
         s.cacheCreate, s.cacheRead, s.total, (s.cost || 0).toFixed(4), s.startedAt || '', s.lastAt || '']);
     }
     window.api.exportFile('sessions.csv', toCsv(rows));
@@ -505,7 +521,7 @@ function renderSessionsTab(detail, folder) {
       const filtered = detail.sessions.filter(s => matchSet.has(s.sessionId));
       document.getElementById('session-tbody').innerHTML = filtered.length
         ? renderSessionRows(filtered)
-        : '<tr><td colspan="4" class="empty-state" style="padding:20px">No matches</td></tr>';
+        : '<tr><td colspan="5" class="empty-state" style="padding:20px">No matches</td></tr>';
       bindSessionClicks(sessEl, folder);
     }, 400);
   });
@@ -523,6 +539,7 @@ function renderDailyTab(detail) {
     const cost = d.cost != null ? d.cost : estimateCost(d.input, d.output, d.cacheCreate, d.cacheRead, null);
     return `<tr>
       <td>${d.date}</td>
+      <td class="tok-total">${formatNum(d.messages || 0)}</td>
       <td class="tok-output">${formatNum(d.output)}</td>
       <td class="tok-cache">${formatNum(d.cacheCreate)}</td>
       <td class="tok-cache">${formatNum(d.cacheRead)}</td>
@@ -533,16 +550,16 @@ function renderDailyTab(detail) {
   dailyEl.innerHTML = `
     <div class="detail-export-bar"><button id="btn-export-daily" class="btn btn-small" title="Export daily totals as CSV">Export CSV</button></div>
     <table class="daily-table">
-      <thead><tr><th>Date</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th></tr></thead>
+      <thead><tr><th>Date</th><th>Messages</th><th>Output</th><th>C.Write</th><th>C.Read</th><th>Est. Cost</th></tr></thead>
       <tbody>${dRows}</tbody>
     </table>
   `;
 
   dailyEl.querySelector('#btn-export-daily').addEventListener('click', () => {
-    const rows = [['Date', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Cost (USD)']];
+    const rows = [['Date', 'Messages', 'Input', 'Output', 'Cache Write', 'Cache Read', 'Cost (USD)']];
     for (const d of detail.dailyTotals) {
       const cost = d.cost != null ? d.cost : estimateCost(d.input, d.output, d.cacheCreate, d.cacheRead, null);
-      rows.push([d.date, d.input, d.output, d.cacheCreate, d.cacheRead, cost.toFixed(4)]);
+      rows.push([d.date, d.messages || 0, d.input, d.output, d.cacheCreate, d.cacheRead, cost.toFixed(4)]);
     }
     window.api.exportFile('daily-totals.csv', toCsv(rows));
   });
@@ -598,36 +615,53 @@ function initModelDetailModal() {
 
 const tc = (n, c) => `${formatNum(n)} <span class="tok-cost">(${formatCost(c)})</span>`;
 
+// Thinking tokens are a subset of output, already inside the output cost — the
+// split is annotation only, so it rides in the OUTPUT cell rather than a column.
+const tcOut = (n, c, thinking) => tc(n, c) +
+  (thinking > 0 ? ` <span class="tok-thinking">(${formatNum(thinking)} thinking)</span>` : '');
+
+function fmtDurationMs(ms) {
+  if (!ms || ms <= 0) return '<span class="subtle">—</span>';
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${s}s`;
+}
+
 function renderModelTable(usage) {
   const rows = usage.map(m => `
     <tr>
       <td><span class="model-badge model-${shortModel(m.model).split('-')[0]}">${shortModel(m.model)}</span></td>
+      <td class="tok-total">${formatNum(m.messages || 0)}</td>
       <td class="tok-input">${tc(m.input, m.inputCost || 0)}</td>
       <td class="tok-cache">${tc(m.cacheCreate, m.cacheCreateCost || 0)}</td>
       <td class="tok-cache">${tc(m.cacheRead, m.cacheReadCost || 0)}</td>
-      <td class="tok-output">${tc(m.output, m.outputCost || 0)}</td>
+      <td class="tok-output">${tcOut(m.output, m.outputCost || 0, m.thinking || 0)}</td>
       <td class="cost-badge">${formatCost(m.cost)}</td>
     </tr>`).join('');
   const tot = usage.reduce((a, m) => {
+    a.messages += m.messages || 0;
+    a.thinking += m.thinking || 0;
     a.output += m.output; a.outputCost += m.outputCost || 0;
     a.cacheCreate += m.cacheCreate; a.cacheCreateCost += m.cacheCreateCost || 0;
     a.cacheRead += m.cacheRead; a.cacheReadCost += m.cacheReadCost || 0;
     a.input += m.input; a.inputCost += m.inputCost || 0;
     a.cost += m.cost;
     return a;
-  }, { output: 0, outputCost: 0, cacheCreate: 0, cacheCreateCost: 0, cacheRead: 0, cacheReadCost: 0, input: 0, inputCost: 0, cost: 0 });
+  }, { output: 0, outputCost: 0, cacheCreate: 0, cacheCreateCost: 0, cacheRead: 0, cacheReadCost: 0, input: 0, inputCost: 0, cost: 0, thinking: 0, messages: 0 });
   return `
     <table class="model-detail-table">
       <thead><tr>
-        <th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Total</th>
+        <th>Model</th><th>Msgs</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Total</th>
       </tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr>
         <td><strong>Total</strong></td>
+        <td class="tok-total"><strong>${formatNum(tot.messages)}</strong></td>
         <td>${tc(tot.input, tot.inputCost)}</td>
         <td>${tc(tot.cacheCreate, tot.cacheCreateCost)}</td>
         <td>${tc(tot.cacheRead, tot.cacheReadCost)}</td>
-        <td>${tc(tot.output, tot.outputCost)}</td>
+        <td>${tcOut(tot.output, tot.outputCost, tot.thinking)}</td>
         <td class="cost-badge"><strong>${formatCost(tot.cost)}</strong></td>
       </tr></tfoot>
     </table>`;
@@ -642,31 +676,53 @@ function renderSubagentTable(sub) {
       <tr>
         <td class="subagent-name">${a.name}${a.spawns > 1 ? ` <span class="spawn-count" title="${a.spawns} spawns">×${a.spawns}</span>` : ''}</td>
         <td>${modelHtml}</td>
+        <td class="tok-total">${formatNum(a.turns || 0)}</td>
+        <td class="tok-total">${formatNum(a.toolUses || 0)}</td>
         <td class="tok-input">${tc(a.input, a.inputCost || 0)}</td>
         <td class="tok-cache">${tc(a.cacheCreate, a.cacheCreateCost || 0)}</td>
         <td class="tok-cache">${tc(a.cacheRead, a.cacheReadCost || 0)}</td>
-        <td class="tok-output">${tc(a.output, a.outputCost || 0)}</td>
+        <td class="tok-output">${tcOut(a.output, a.outputCost || 0, a.thinking || 0)}</td>
         <td class="tok-total">${formatNum(a.total)}</td>
+        <td class="tok-time">${fmtDurationMs(a.durationMs)}</td>
         <td class="cost-badge">${formatCost(a.cost)}</td>
       </tr>`;
   }).join('');
   const t = sub.totals;
+  // totals carries tokens and cost only — turns/tools are per-row, sum them here.
+  const turns = sub.agents.reduce((s, a) => s + (a.turns || 0), 0);
+  const tools = sub.agents.reduce((s, a) => s + (a.toolUses || 0), 0);
   return `
     <table class="model-detail-table subagent-table">
       <thead><tr>
-        <th>Teammate / Subagent</th><th>Model</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Tokens</th><th>Cost</th>
+        <th>Teammate / Subagent</th><th>Model</th><th>Turns</th><th>Tools</th><th>Input</th><th>C.Write</th><th>C.Read</th><th>Output</th><th>Tokens</th><th>Time</th><th>Cost</th>
       </tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr>
         <td><strong>Total</strong></td><td></td>
+        <td class="tok-total"><strong>${formatNum(turns)}</strong></td>
+        <td class="tok-total"><strong>${formatNum(tools)}</strong></td>
         <td>${tc(t.input, t.inputCost || 0)}</td>
         <td>${tc(t.cacheCreate, t.cacheCreateCost || 0)}</td>
         <td>${tc(t.cacheRead, t.cacheReadCost || 0)}</td>
-        <td>${tc(t.output, t.outputCost || 0)}</td>
+        <td>${tcOut(t.output, t.outputCost || 0, t.thinking || 0)}</td>
         <td class="tok-total"><strong>${formatNum(t.total)}</strong></td>
+        <td></td>
         <td class="cost-badge"><strong>${formatCost(t.cost)}</strong></td>
       </tr></tfoot>
     </table>`;
+}
+
+// Usage shapes the pricing math cannot account for. Zero in every transcript so
+// far, so nothing renders today — the point is that a new shape shows up loudly
+// instead of quietly shrinking the totals.
+function renderUsageFlags(flags) {
+  if (!flags) return '';
+  const notes = [];
+  if (flags.webSearch) notes.push(`${formatNum(flags.webSearch)} web search${flags.webSearch === 1 ? '' : 'es'} not priced`);
+  if (flags.webFetch)  notes.push(`${formatNum(flags.webFetch)} web fetch${flags.webFetch === 1 ? '' : 'es'} not priced`);
+  if (flags.fastMode) notes.push(`${formatNum(flags.fastMode)} fast-mode responses priced at standard rates - cost is understated`);
+  if (flags.multiIter) notes.push('multi-iteration responses seen - token totals may undercount');
+  return notes.map(n => `<div class="usage-warning">${n}</div>`).join('');
 }
 
 async function showModelDetailModal(session, folder) {
@@ -678,11 +734,14 @@ async function showModelDetailModal(session, folder) {
   const usage = session.modelUsage || [];
   const mainCost = usage.reduce((s, m) => s + (m.cost || 0), 0);
   const mainTotal = usage.reduce((s, m) => s + m.input + m.output + m.cacheCreate + m.cacheRead, 0);
+  const mainSavings = usage.reduce((s, m) => s + (m.savings || 0), 0);
 
   body.innerHTML = `
     <div class="modal-section-label">Main thread</div>
+    ${renderUsageFlags(session.flags)}
     ${usage.length ? renderModelTable(usage) : '<div class="empty-state">No model breakdown available</div>'}
-    <div id="subagent-section"><div class="subtle" style="padding:8px 0">Loading team / subagent usage…</div></div>`;
+    <div id="subagent-section"><div class="subtle" style="padding:8px 0">Loading team / subagent usage…</div></div>
+    <div id="savings-line"></div>`;
   overlay.classList.remove('hidden');
 
   let sub = null;
@@ -692,18 +751,24 @@ async function showModelDetailModal(session, folder) {
 
   if (!sub || !sub.agentCount) {
     section.innerHTML = '';
-    return;
+  } else {
+    const grandTotal = mainTotal + sub.totals.total;
+    const grandCost  = mainCost + sub.totals.cost;
+    section.innerHTML = `
+      <div class="modal-section-label">Subagents &amp; team <span class="spawn-count">${sub.agentCount} transcript${sub.agentCount === 1 ? '' : 's'}</span></div>
+      ${renderUsageFlags(sub.flags)}
+      ${renderSubagentTable(sub)}
+      <div class="grand-total-bar">
+        <span>Session + subagents</span>
+        <span class="grand-total-figures">${formatNum(grandTotal)} tokens &middot; <span class="cost-badge">${formatCost(grandCost)}</span></span>
+      </div>`;
   }
 
-  const grandTotal = mainTotal + sub.totals.total;
-  const grandCost  = mainCost + sub.totals.cost;
-  section.innerHTML = `
-    <div class="modal-section-label">Subagents &amp; team <span class="spawn-count">${sub.agentCount} transcript${sub.agentCount === 1 ? '' : 's'}</span></div>
-    ${renderSubagentTable(sub)}
-    <div class="grand-total-bar">
-      <span>Session + subagents</span>
-      <span class="grand-total-figures">${formatNum(grandTotal)} tokens &middot; <span class="cost-badge">${formatCost(grandCost)}</span></span>
-    </div>`;
+  const savings = mainSavings + ((sub && sub.totals && sub.totals.savings) || 0);
+  if (savings > 0) {
+    document.getElementById('savings-line').innerHTML =
+      `<div class="savings-note">Cache reads saved ~${formatCost(savings)} vs. input-rate pricing</div>`;
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

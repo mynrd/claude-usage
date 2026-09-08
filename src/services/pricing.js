@@ -5,12 +5,16 @@ const { getPricingForDate } = require('./price-history');
 const MODEL_PRICING = {
   'fable-5':     { input: 10,   output: 50 },
   'mythos-5':    { input: 10,   output: 50 },
+  'opus-5':      { input: 5,    output: 25 },
   'opus-4.8':    { input: 5,    output: 25 },
   'opus-4.7':    { input: 5,    output: 25 },
   'opus-4.6':    { input: 5,    output: 25 },
   'opus-4.5':    { input: 5,    output: 25 },
   'opus-4.1':    { input: 15,   output: 75 },
   'opus-4':      { input: 15,   output: 75 },
+  // sonnet-5 introductory pricing ($2/$10) runs to 2026-08-31 and lives in
+  // price-history.json; this fallback is the post-intro rate.
+  'sonnet-5':    { input: 3,    output: 15 },
   'sonnet-4.6':  { input: 3,    output: 15 },
   'sonnet-4.5':  { input: 3,    output: 15 },
   'sonnet-4':    { input: 3,    output: 15 },
@@ -22,8 +26,8 @@ const MODEL_PRICING = {
 const FAMILY_DEFAULT = {
   fable:  MODEL_PRICING['fable-5'],
   mythos: MODEL_PRICING['mythos-5'],
-  opus:   MODEL_PRICING['opus-4.8'],
-  sonnet: MODEL_PRICING['sonnet-4.6'],
+  opus:   MODEL_PRICING['opus-5'],
+  sonnet: MODEL_PRICING['sonnet-5'],
   haiku:  MODEL_PRICING['haiku-4.5'],
 };
 
@@ -60,14 +64,19 @@ function getModelKey(modelName) {
 // Returns cost split by token type: { input, output, cacheCreate, cacheRead },
 // plus `cacheReadSavings` — what the cache-read tokens would have cost extra at
 // the full input rate (i.e. the money prompt caching saved).
-function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date) {
+// `cacheCreate1h` is the portion of cacheCreate written with a 1-hour TTL
+// (usage.cache_creation.ephemeral_1h_input_tokens) — billed at 2x input
+// instead of the 5-minute 1.25x.
+function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date, cacheCreate1h = 0) {
+  const c1h = Math.min(cacheCreate1h || 0, cacheCreate);
+  const c5m = cacheCreate - c1h;
   const key  = getModelKey(modelName);
   const hist = getPricingForDate(key, date || null);
   if (hist) {
     return {
       input:       (input / 1e6) * hist.input,
       output:      (output / 1e6) * hist.output,
-      cacheCreate: (cacheCreate / 1e6) * hist.cacheWrite5m,
+      cacheCreate: (c5m / 1e6) * hist.cacheWrite5m + (c1h / 1e6) * (hist.cacheWrite1h ?? hist.cacheWrite5m),
       cacheRead:   (cacheRead / 1e6) * hist.cacheRead,
       cacheReadSavings: (cacheRead / 1e6) * Math.max(0, hist.input - hist.cacheRead),
     };
@@ -76,14 +85,14 @@ function calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, dat
   return {
     input:       (input / 1e6) * p.input,
     output:      (output / 1e6) * p.output,
-    cacheCreate: (cacheCreate / 1e6) * p.input * 1.25,
+    cacheCreate: (c5m / 1e6) * p.input * 1.25 + (c1h / 1e6) * p.input * 2,
     cacheRead:   (cacheRead / 1e6) * p.input * 0.10,
     cacheReadSavings: (cacheRead / 1e6) * p.input * 0.90,
   };
 }
 
-function calcCost(input, output, cacheCreate, cacheRead, modelName, date) {
-  const b = calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date);
+function calcCost(input, output, cacheCreate, cacheRead, modelName, date, cacheCreate1h = 0) {
+  const b = calcCostBreakdown(input, output, cacheCreate, cacheRead, modelName, date, cacheCreate1h);
   return b.input + b.output + b.cacheCreate + b.cacheRead;
 }
 
